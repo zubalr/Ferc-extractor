@@ -1,0 +1,20 @@
+[project]
+name = "ferc-eqr-scraper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "catalystcoop-ferc-xbrl-extractor==1.6.0",
+    "click>=8.1.8",
+    "psycopg2-binary>=2.9.10",
+    "requests>=2.32.4",
+    "tqdm>=4.67.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
+    "pytest-mock>=3.14.1",
+]

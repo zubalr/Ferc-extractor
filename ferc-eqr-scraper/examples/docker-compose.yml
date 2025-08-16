@@ -1,0 +1,37 @@
+# Docker Compose example for FERC EQR Scraper with PostgreSQL
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: ferc_data
+      POSTGRES_USER: ferc_user
+      POSTGRES_PASSWORD: ferc_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ferc_user -d ferc_data"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ferc-scraper:
+    build: .
+    environment:
+      FERC_DATABASE_URI: postgresql://ferc_user:ferc_password@postgres:5432/ferc_data
+      LOG_LEVEL: INFO
+      CHUNK_SIZE: 10000
+    volumes:
+      - ./ferc_data:/app/ferc_data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "main.py", "--start-year", "2023", "--end-year", "2023"]
+
+volumes:
+  postgres_data:
