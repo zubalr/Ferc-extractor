@@ -423,6 +423,15 @@ class FERCDatabase:
         # Optimize data types
         optimized_df = self.optimize_dataframe_dtypes(df)
         
+        # Additional data cleaning for transactions table
+        if table_name == 'transactions':
+            self.logger.debug(f"Cleaning transaction data for {len(optimized_df)} rows")
+            # Ensure all string columns don't have problematic values
+            for col in optimized_df.columns:
+                if optimized_df[col].dtype == 'object':
+                    # Replace NaN with None for proper SQL handling
+                    optimized_df[col] = optimized_df[col].where(optimized_df[col].notna(), None)
+        
         # Get schema info
         schema_info = self.get_dataframe_schema_info(optimized_df, table_name)
         
@@ -435,15 +444,24 @@ class FERCDatabase:
             # Use chunked loading for large DataFrames
             chunk_size = min(config.CHUNK_SIZE, len(optimized_df))
             
-            with self.engine.begin() as conn:  # Transaction context
-                optimized_df.to_sql(
-                    name=table_name,
-                    con=conn,
-                    if_exists=if_exists,
-                    index=False,
-                    chunksize=chunk_size,
-                    method='multi'  # Use multi-row INSERT for better performance
-                )
+            try:
+                with self.engine.begin() as conn:  # Transaction context
+                    optimized_df.to_sql(
+                        name=table_name,
+                        con=conn,
+                        if_exists=if_exists,
+                        index=False,
+                        chunksize=chunk_size,
+                        method=None  # Use default method instead of 'multi' for better compatibility
+                    )
+            except Exception as e:
+                self.logger.error(f"SQL insertion error for table {table_name}: {e}")
+                self.logger.error(f"DataFrame shape: {optimized_df.shape}")
+                self.logger.error(f"DataFrame columns: {list(optimized_df.columns)}")
+                self.logger.error(f"DataFrame dtypes: {optimized_df.dtypes.to_dict()}")
+                if len(optimized_df) > 0:
+                    self.logger.error(f"Sample row: {optimized_df.iloc[0].to_dict()}")
+                raise
         
         # Execute with retry logic
         self.execute_with_retry(_load_operation)
