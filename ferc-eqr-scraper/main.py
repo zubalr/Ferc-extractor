@@ -224,6 +224,8 @@ def run_pipeline(start_year: Optional[int], end_year: Optional[int],
             
             if dry_run:
                 logger.info(f"Would process {len(downloaded_files)} files")
+                if files is not None:
+                    logger.info(f"Would limit processing to {files} nested ZIP files per main ZIP")
             else:
                 processed_data = processor.process_multiple_files(downloaded_files, files)
                 

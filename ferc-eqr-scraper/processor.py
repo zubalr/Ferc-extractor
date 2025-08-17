@@ -216,11 +216,12 @@ class FERCProcessor:
         
         return stats
     
-    def extract_nested_zip_files(self, extract_dir: str) -> str:
+    def extract_nested_zip_files(self, extract_dir: str, max_files: Optional[int] = None) -> str:
         """Extract nested ZIP files to get XML files.
         
         Args:
             extract_dir: Directory containing nested ZIP files
+            max_files: Maximum number of nested ZIP files to extract (None for all)
             
         Returns:
             Directory containing extracted XML files
@@ -229,6 +230,11 @@ class FERCProcessor:
         ensure_directory(xml_extract_dir)
         
         zip_files = [f for f in self.get_extracted_files(extract_dir) if f.lower().endswith('.zip')]
+        
+        # Limit files if requested
+        if max_files is not None and max_files < len(zip_files):
+            zip_files = zip_files[:max_files]
+            self.logger.info(f"Limited to first {max_files} nested ZIP files for processing")
         
         self.logger.info(f"Extracting {len(zip_files)} nested ZIP files...")
         
@@ -259,7 +265,7 @@ class FERCProcessor:
         
         Args:
             extract_dir: Directory containing extracted files
-            max_files: Maximum number of XML files to process (None for all)
+            max_files: Maximum number of nested ZIP files to process (None for all)
             
         Returns:
             Dictionary of DataFrames with parsed data
@@ -277,7 +283,7 @@ class FERCProcessor:
             
             if zip_files and not xml_files:
                 # We have nested ZIP files, extract them first
-                xml_extract_dir = self.extract_nested_zip_files(extract_dir)
+                xml_extract_dir = self.extract_nested_zip_files(extract_dir, max_files)
                 # Find all XML files in the extracted directory
                 xml_files = []
                 for root, dirs, filenames in os.walk(xml_extract_dir):
@@ -292,14 +298,7 @@ class FERCProcessor:
                 return {}
             
             self.logger.info(f"Found {len(xml_files)} XML files to process")
-            
-            # Limit files if requested
-            if max_files is not None and max_files < len(xml_files):
-                xml_files = xml_files[:max_files]
-                self.logger.info(f"Limited to first {max_files} XML files for processing")
-            
             self.logger.info(f"XML files are located in: {xml_extract_dir}")
-            self.logger.info(f"Processing {len(xml_files)} XML files")
             
             # Use our custom EQR parser
             self.logger.info("Parsing EQR XML data using custom parser...")
@@ -376,7 +375,7 @@ class FERCProcessor:
         
         Args:
             zip_path: Path to ZIP file to process
-            max_files: Maximum number of XML files to process (None for all)
+            max_files: Maximum number of nested ZIP files to process (None for all)
             
         Returns:
             Dictionary of DataFrames with extracted data
@@ -453,7 +452,7 @@ class FERCProcessor:
         
         Args:
             zip_paths: List of ZIP file paths to process
-            max_files: Maximum number of XML files to process per ZIP (None for all)
+            max_files: Maximum number of nested ZIP files to process per main ZIP (None for all)
             
         Returns:
             Dictionary mapping table names to lists of DataFrames
