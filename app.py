@@ -12,24 +12,27 @@ st.set_page_config(page_title="FERC Data Explorer", layout="wide")
 DEFAULT_DB = os.path.join("ferc-eqr-scraper", "ferc_data.db")
 
 
-@st.cache_data(ttl=600)
+@st.cache_resource
 def get_conn(db_path: str):
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"Database not found at {db_path}")
     # sqlite3 connections are not inherently thread-safe; allow check_same_thread=False
+    # Use cache_resource for unserializable objects like DB connections
     return sqlite3.connect(db_path, check_same_thread=False)
 
 
 @st.cache_data(ttl=600)
-def list_tables(conn) -> List[str]:
+def list_tables(db_path: str) -> List[str]:
     q = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    return [r[0] for r in conn.execute(q).fetchall()]
+    with sqlite3.connect(db_path) as conn:
+        return [r[0] for r in conn.execute(q).fetchall()]
 
 
 @st.cache_data(ttl=600)
-def read_table(conn, table_name: str, limit: int = 1000) -> pd.DataFrame:
+def read_table(db_path: str, table_name: str, limit: int = 1000) -> pd.DataFrame:
     q = f"SELECT * FROM \"{table_name}\" LIMIT {limit}"
-    return pd.read_sql_query(q, conn)
+    with sqlite3.connect(db_path) as conn:
+        return pd.read_sql_query(q, conn)
 
 
 def main():
