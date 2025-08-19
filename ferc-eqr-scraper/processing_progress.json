@@ -1,23 +1,7 @@
 {
-  "completed_files": [
-    "ferc_data/downloads/XML_2025_Q1.zip"
-  ],
+  "completed_files": [],
   "failed_files": [],
-  "last_updated": "2025-08-19T05:17:50.578666",
-  "total_records_processed": 794524,
-  "session_stats": {
-    "ferc_data/downloads/XML_2025_Q1.zip": {
-      "stats": {
-        "organizations": 155,
-        "contacts": 75,
-        "contracts": 112,
-        "contract_products": 338,
-        "transactions": 793844,
-        "files_processed": 47,
-        "files_failed": 0
-      },
-      "completed_at": "2025-08-19T05:17:50.578656",
-      "total_records": 794524
-    }
-  }
+  "last_updated": "2025-08-19T05:27:54.866818",
+  "total_records_processed": 0,
+  "session_stats": {}
 }

@@ -92,6 +92,18 @@ class ProcessingProgress:
             'total_records_processed': self.data['total_records_processed'],
             'last_updated': self.data['last_updated']
         }
+    
+    def reset_progress(self):
+        """Reset all progress data."""
+        self.data = {
+            'completed_files': [],
+            'failed_files': [],
+            'last_updated': None,
+            'total_records_processed': 0,
+            'session_stats': {}
+        }
+        self.save_progress()
+        logging.getLogger("ferc_scraper.processor").info("Progress tracking has been reset")
 
 
 class FERCProcessor:
@@ -125,6 +137,24 @@ class FERCProcessor:
         
         self.logger.info(f"Initialized processor with {max_memory_usage_pct}% memory limit")
         self.logger.info(f"Initial memory usage: {format_bytes(self.initial_memory)}")
+    
+    def check_database_consistency(self, database):
+        """Check if database tables exist and reset progress if they don't.
+        
+        This is important when the database has been deleted but progress tracking
+        still shows files as completed.
+        """
+        if not self.progress:
+            return
+        
+        # Check if any main tables exist
+        main_tables = ['organizations', 'contacts', 'contracts', 'transactions']
+        tables_exist = any(database.table_exists(table) for table in main_tables)
+        
+        # If no main tables exist but we have completed files, reset progress
+        if not tables_exist and len(self.progress.data['completed_files']) > 0:
+            self.logger.warning("Database tables missing but progress shows completed files - resetting progress")
+            self.progress.reset_progress()
     
     def get_memory_usage(self) -> int:
         """Get current memory usage in bytes."""
@@ -841,6 +871,9 @@ class FERCProcessor:
         self.logger.info("Enabling database performance mode for bulk loading")
         database.enable_performance_mode()
         database.drop_all_indexes()
+        
+        # Check database consistency with progress tracking
+        self.check_database_consistency(database)
         
         try:
             for i, zip_path in enumerate(zip_paths, 1):

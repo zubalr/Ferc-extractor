@@ -33,7 +33,7 @@ class Config:
         self.MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
         
         # Memory management settings
-        self.MAX_MEMORY_USAGE_PCT = float(os.environ.get("MAX_MEMORY_USAGE_PCT", "50.0"))  # Reduced from 70% to 50%
+        self.MAX_MEMORY_USAGE_PCT = float(os.environ.get("MAX_MEMORY_USAGE_PCT", "95.0"))  # Increased to 95% for better throughput
         self.BATCH_SIZE_XML_FILES = int(os.environ.get("BATCH_SIZE_XML_FILES", "5"))  # Reduced from 10 to 5
         self.CONCAT_CHUNK_SIZE = int(os.environ.get("CONCAT_CHUNK_SIZE", "10"))  # Reduced from 25 to 10
         

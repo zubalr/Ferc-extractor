@@ -886,58 +886,83 @@ class FERCDatabase:
                 # If no unique columns defined, use all columns
                 return df.drop_duplicates()
             
-            # Check for existing records in batches to manage memory
+            # For small datasets, process all at once
+            if len(df) <= 1000:
+                return self._remove_duplicates_batch(df, table_name, unique_cols)
+            
+            # For larger datasets, process in batches and collect results
             batch_size = 5000
-            unique_df = df.copy()
+            non_duplicate_dfs = []
             
             for start_idx in range(0, len(df), batch_size):
                 end_idx = min(start_idx + batch_size, len(df))
-                batch_df = df.iloc[start_idx:end_idx]
+                batch_df = df.iloc[start_idx:end_idx].copy()
                 
-                # Build query to check for existing records
-                conditions = []
-                for _, row in batch_df.iterrows():
-                    row_conditions = []
-                    for col in unique_cols:
-                        if col in row.index and pd.notna(row[col]):
-                            value = row[col]
-                            if isinstance(value, str):
-                                escaped_value = value.replace("'", "''")
-                                row_conditions.append(f"{col} = '{escaped_value}'")
-                            else:
-                                row_conditions.append(f"{col} = {value}")
-                    
-                    if row_conditions:
-                        conditions.append("(" + " AND ".join(row_conditions) + ")")
-                
-                if conditions:
-                    query = f"SELECT {', '.join(unique_cols)} FROM {table_name} WHERE " + " OR ".join(conditions)
-                    
-                    try:
-                        with self.engine.connect() as conn:
-                            existing_records = pd.read_sql(query, conn)
-                        
-                        if not existing_records.empty:
-                            # Remove matching records
-                            merge_cols = [col for col in unique_cols if col in batch_df.columns]
-                            if merge_cols:
-                                batch_df = batch_df.merge(existing_records[merge_cols], on=merge_cols, how='left', indicator=True)
-                                batch_df = batch_df[batch_df['_merge'] == 'left_only'].drop('_merge', axis=1)
-                        
-                        # Update the unique_df with deduplicated batch
-                        unique_df.iloc[start_idx:end_idx] = batch_df
-                        
-                    except Exception as e:
-                        self.logger.debug(f"Error checking duplicates for batch: {e}")
-                        continue
+                # Process this batch
+                cleaned_batch = self._remove_duplicates_batch(batch_df, table_name, unique_cols)
+                if not cleaned_batch.empty:
+                    non_duplicate_dfs.append(cleaned_batch)
             
-            removed_count = len(df) - len(unique_df.dropna())
-            if removed_count > 0:
-                self.logger.info(f"Removed {removed_count} duplicates from {table_name}")
-            
-            return unique_df.dropna()
+            # Combine all non-duplicate batches
+            if non_duplicate_dfs:
+                result_df = pd.concat(non_duplicate_dfs, ignore_index=True)
+                removed_count = len(df) - len(result_df)
+                if removed_count > 0:
+                    self.logger.info(f"Removed {removed_count} duplicates from {table_name}")
+                return result_df
+            else:
+                return pd.DataFrame(columns=df.columns)
             
         except Exception as e:
+            self.logger.warning(f"Error removing duplicates for {table_name}: {e}")
+            return df.drop_duplicates()  # Fall back to simple deduplication
+    
+    def _remove_duplicates_batch(self, batch_df: pd.DataFrame, table_name: str, unique_cols: list) -> pd.DataFrame:
+        """Remove duplicates for a single batch."""
+        try:
+            # Build query to check for existing records
+            conditions = []
+            for _, row in batch_df.iterrows():
+                row_conditions = []
+                for col in unique_cols:
+                    if col in row.index and pd.notna(row[col]):
+                        value = row[col]
+                        if isinstance(value, str):
+                            escaped_value = value.replace("'", "''")
+                            row_conditions.append(f"{col} = '{escaped_value}'")
+                        else:
+                            row_conditions.append(f"{col} = {value}")
+                
+                if row_conditions:
+                    conditions.append("(" + " AND ".join(row_conditions) + ")")
+            
+            if not conditions:
+                return batch_df
+            
+            query = f"SELECT {', '.join(unique_cols)} FROM {table_name} WHERE " + " OR ".join(conditions)
+            
+            try:
+                with self.engine.connect() as conn:
+                    existing_records = pd.read_sql(query, conn)
+                
+                if existing_records.empty:
+                    return batch_df
+                
+                # Remove matching records using merge
+                merge_cols = [col for col in unique_cols if col in batch_df.columns]
+                if merge_cols:
+                    merged = batch_df.merge(existing_records[merge_cols], on=merge_cols, how='left', indicator=True)
+                    return merged[merged['_merge'] == 'left_only'].drop('_merge', axis=1)
+                else:
+                    return batch_df
+                    
+            except Exception as e:
+                self.logger.debug(f"Error checking duplicates for batch: {e}")
+                return batch_df
+                
+        except Exception as e:
+            self.logger.debug(f"Error in duplicate removal batch: {e}")
+            return batch_df
             self.logger.warning(f"Error removing duplicates for {table_name}: {e}")
             return df.drop_duplicates()  # Fall back to simple deduplication
     
