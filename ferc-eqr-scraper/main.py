@@ -7,7 +7,7 @@ import click
 import logging
 
 from settings import config
-from utils import setup_logging, validate_year_range, validate_quarters
+from utils import setup_logging, validate_year_range, validate_quarters, log_memory_usage, cleanup_memory
 from downloader import FERCDownloader
 from processor import FERCProcessor
 from database import FERCDatabase
@@ -182,11 +182,14 @@ def run_pipeline(start_year: Optional[int], end_year: Optional[int],
         
         # Initialize components
         downloader = FERCDownloader() if not process_only else None
-        processor = FERCProcessor() if not download_only else None
+        processor = FERCProcessor(max_memory_usage_pct=config.MAX_MEMORY_USAGE_PCT) if not download_only else None
         database = FERCDatabase() if not download_only else None
         
         downloaded_files = []
         processed_data = {}
+        
+        # Log initial memory usage
+        log_memory_usage(logger, "pipeline start")
         
         # Step 1: Download files
         if not process_only:
@@ -227,25 +230,38 @@ def run_pipeline(start_year: Optional[int], end_year: Optional[int],
                 if files is not None:
                     logger.info(f"Would limit processing to {files} nested ZIP files per main ZIP")
             else:
+                log_memory_usage(logger, "before processing")
                 processed_data = processor.process_multiple_files(downloaded_files, files)
+                log_memory_usage(logger, "after processing")
                 
                 if not processed_data:
                     logger.warning("No data was extracted from the files")
+                
+                # Force cleanup after processing
+                cleanup_memory()
+                log_memory_usage(logger, "after cleanup")
         
-        # Step 3: Load to database
+        # Step 3: Load to database with streaming approach
         if not download_only and not dry_run:
             if processed_data:
                 logger.info("Starting database loading phase...")
+                log_memory_usage(logger, "before database loading")
                 
-                # Initialize database schema
-                database.initialize_schema()
+                # Initialize production-ready database schema
+                database.initialize_production_schema()
                 
-                # Load the data
-                database.load_dataframes_batch(processed_data)
+                # Use the new streaming approach for memory efficiency
+                database.load_dataframes_batch_streaming(processed_data, batch_size=config.CHUNK_SIZE)
                 
                 # Get final database info
                 final_info = database.get_existing_data_info()
                 logger.info(f"Database now contains {final_info['total_rows']} total rows across {final_info['total_tables']} tables")
+                
+                # Display table-specific counts
+                for table_name, table_info in final_info['tables'].items():
+                    logger.info(f"  {table_name}: {table_info['row_count']} rows")
+                
+                log_memory_usage(logger, "after database loading")
             else:
                 logger.info("No data to load to database")
         

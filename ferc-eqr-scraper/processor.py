@@ -1,10 +1,12 @@
-"""Processing component for FERC EQR XML data extraction."""
+"""Processing component for FERC EQR XML data extraction with memory efficiency."""
 
 import os
 import shutil
 import zipfile
+import gc
+import psutil
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Generator, Iterator
 import pandas as pd
 import logging
 from tqdm import tqdm
@@ -15,15 +17,87 @@ from eqr_parser import EQRXMLParser
 
 
 class FERCProcessor:
-    """Processor for FERC EQR ZIP files and XML data extraction."""
+    """Memory-efficient processor for FERC EQR ZIP files and XML data extraction."""
     
-    def __init__(self):
-        """Initialize the processor."""
+    def __init__(self, max_memory_usage_pct: float = 70.0):
+        """Initialize the processor with memory monitoring.
+        
+        Args:
+            max_memory_usage_pct: Maximum memory usage percentage before triggering cleanup
+        """
         self.logger = logging.getLogger("ferc_scraper.processor")
         self.eqr_parser = EQRXMLParser()
+        self.max_memory_usage_pct = max_memory_usage_pct
+        
+        # Memory monitoring
+        self.process = psutil.Process()
+        self.initial_memory = self.get_memory_usage()
         
         # Ensure directories exist
         ensure_directory(config.EXTRACT_DIR)
+        
+        self.logger.info(f"Initialized processor with {max_memory_usage_pct}% memory limit")
+        self.logger.info(f"Initial memory usage: {format_bytes(self.initial_memory)}")
+    
+    def get_memory_usage(self) -> int:
+        """Get current memory usage in bytes."""
+        return self.process.memory_info().rss
+
+    def get_memory_usage_pct(self) -> float:
+        """Get current memory usage as percentage of total system memory."""
+        return psutil.virtual_memory().percent
+
+    def monitor_memory(self, operation_name: str) -> None:
+        """Monitor and log memory usage for an operation."""
+        current_memory = self.get_memory_usage()
+        current_pct = self.get_memory_usage_pct()
+        
+        self.logger.debug(
+            f"Memory usage during {operation_name}: {format_bytes(current_memory)} ({current_pct:.1f}%)"
+        )
+        
+        # Force garbage collection if memory usage is high
+        if current_pct > self.max_memory_usage_pct:
+            self.logger.warning(f"High memory usage ({current_pct:.1f}%), forcing garbage collection")
+            collected = gc.collect()
+            new_memory = self.get_memory_usage()
+            new_pct = self.get_memory_usage_pct()
+            
+            freed_memory = current_memory - new_memory
+            self.logger.info(
+                f"Garbage collection: freed {collected} objects, "
+                f"recovered {format_bytes(freed_memory)} "
+                f"(now {new_pct:.1f}%)"
+            )
+
+    def check_emergency_memory_limit(self) -> bool:
+        """Check if memory usage has exceeded emergency threshold.
+        
+        Returns:
+            True if emergency threshold exceeded, False otherwise
+        """
+        current_pct = self.get_memory_usage_pct()
+        emergency_threshold = config.EMERGENCY_MEMORY_THRESHOLD
+        
+        if current_pct > emergency_threshold:
+            self.logger.error(f"EMERGENCY: Memory usage ({current_pct:.1f}%) exceeded threshold ({emergency_threshold}%)")
+            return True
+        return False
+
+    def should_process_more(self) -> bool:
+        """Check if we should continue processing based on memory usage."""
+        current_pct = self.get_memory_usage_pct()
+        
+        # Emergency stop - if memory is too high, stop immediately
+        if self.check_emergency_memory_limit():
+            self.logger.error("EMERGENCY STOP: Memory usage exceeded emergency threshold")
+            return False
+            
+        # Normal memory limit check
+        if current_pct > self.max_memory_usage_pct:
+            self.logger.warning(f"Memory usage too high ({current_pct:.1f}%), should pause processing")
+            return False
+        return True
     
     def extract_archive(self, zip_path: str, extract_dir: Optional[str] = None) -> str:
         """Extract ZIP archive to specified directory.
@@ -261,7 +335,7 @@ class FERCProcessor:
         return xml_extract_dir
 
     def parse_xml_data(self, extract_dir: str, max_files: Optional[int] = None) -> Dict[str, pd.DataFrame]:
-        """Parse XML data using custom EQR parser.
+        """Parse XML data using custom EQR parser with memory efficiency.
         
         Args:
             extract_dir: Directory containing extracted files
@@ -274,6 +348,7 @@ class FERCProcessor:
             Exception: If parsing fails
         """
         self.logger.info("Starting FERC EQR XML data extraction...")
+        self.monitor_memory("XML parsing start")
         
         xml_extract_dir = None
         try:
@@ -300,42 +375,103 @@ class FERCProcessor:
             self.logger.info(f"Found {len(xml_files)} XML files to process")
             self.logger.info(f"XML files are located in: {xml_extract_dir}")
             
-            # Use our custom EQR parser
+            # Use our custom EQR parser with streaming approach
             self.logger.info("Parsing EQR XML data using custom parser...")
             
-            # Parse all XML files
-            all_dataframes = self.eqr_parser.parse_multiple_files(xml_files)
-            
-            # Convert lists of DataFrames to single DataFrames per table
+            # Parse XML files in batches to manage memory
+            batch_size = min(10, len(xml_files))  # Process 10 files at a time
             combined_dataframes = {}
-            for table_name, df_list in all_dataframes.items():
-                if df_list:
-                    combined_df = pd.concat(df_list, ignore_index=True)
-                    combined_dataframes[table_name] = combined_df
-                    self.logger.info(f"Combined {len(df_list)} DataFrames into {table_name}: {len(combined_df)} total rows")
+            processed_files = 0
+            
+            for batch_start in range(0, len(xml_files), batch_size):
+                batch_end = min(batch_start + batch_size, len(xml_files))
+                batch_files = xml_files[batch_start:batch_end]
+                
+                self.logger.info(f"Processing batch {batch_start//batch_size + 1}: files {batch_start+1}-{batch_end}")
+                
+                # Check memory before processing batch
+                if not self.should_process_more():
+                    self.logger.warning("Memory usage too high, stopping processing")
+                    break
+                
+                # Parse batch of files
+                batch_dataframes = self.eqr_parser.parse_multiple_files(batch_files)
+                
+                # Merge with existing DataFrames
+                for table_name, df_list in batch_dataframes.items():
+                    if table_name not in combined_dataframes:
+                        combined_dataframes[table_name] = []
+                    combined_dataframes[table_name].extend(df_list)
+                
+                processed_files += len(batch_files)
+                self.monitor_memory(f"batch processing {processed_files}/{len(xml_files)} files")
+                
+                # Force cleanup after each batch
+                del batch_dataframes
+                gc.collect()
             
             if not combined_dataframes:
                 self.logger.warning("No data extracted from XML files")
                 return {}
             
+            # Convert lists to single DataFrames efficiently
+            final_dataframes = {}
+            for table_name, df_list in combined_dataframes.items():
+                if df_list:
+                    if len(df_list) == 1:
+                        final_dataframes[table_name] = df_list[0]
+                    else:
+                        # Process concatenation in chunks if too many DataFrames
+                        if len(df_list) > 50:  # Arbitrary threshold
+                            self.logger.info(f"Large number of DataFrames for {table_name} ({len(df_list)}), processing in chunks")
+                            
+                            # Concatenate in chunks to avoid memory issues
+                            chunk_size = 25
+                            chunks = []
+                            for i in range(0, len(df_list), chunk_size):
+                                chunk_dfs = df_list[i:i+chunk_size]
+                                chunk_combined = pd.concat(chunk_dfs, ignore_index=True)
+                                chunks.append(chunk_combined)
+                                
+                                # Clean up chunk DataFrames
+                                del chunk_dfs
+                                gc.collect()
+                            
+                            # Final concatenation
+                            final_dataframes[table_name] = pd.concat(chunks, ignore_index=True)
+                            del chunks
+                        else:
+                            final_dataframes[table_name] = pd.concat(df_list, ignore_index=True)
+                    
+                    self.logger.info(f"Final {table_name}: {len(final_dataframes[table_name])} total rows")
+                    self.monitor_memory(f"combined {table_name}")
+            
+            # Clean up intermediate data
+            del combined_dataframes
+            gc.collect()
+            
             # Log extraction results
-            total_rows = sum(len(df) for df in combined_dataframes.values())
+            total_rows = sum(len(df) for df in final_dataframes.values())
             self.logger.info(
-                f"Successfully extracted {len(combined_dataframes)} tables "
-                f"with {total_rows} total rows"
+                f"Successfully extracted {len(final_dataframes)} tables "
+                f"with {total_rows} total rows from {processed_files} files"
             )
             
             # Log table details
-            for table_name, df in combined_dataframes.items():
-                self.logger.info(f"  {table_name}: {len(df)} rows, {len(df.columns)} columns")
+            for table_name, df in final_dataframes.items():
+                memory_mb = df.memory_usage(deep=True).sum() / (1024 * 1024)
+                self.logger.info(f"  {table_name}: {len(df)} rows, {len(df.columns)} columns, {memory_mb:.1f} MB")
             
-            return combined_dataframes
+            return final_dataframes
                 
         except Exception as e:
             self.logger.error(f"Error during EQR XML extraction: {e}")
             import traceback
             self.logger.error(f"Traceback: {traceback.format_exc()}")
             raise
+        finally:
+            # Always force cleanup
+            gc.collect()
     
     def validate_dataframes(self, dataframes: Dict[str, pd.DataFrame]) -> bool:
         """Validate extracted DataFrames.
@@ -448,7 +584,7 @@ class FERCProcessor:
             return True  # Skip this file and continue by default
     
     def process_multiple_files(self, zip_paths: list[str], max_files: Optional[int] = None) -> Dict[str, list[pd.DataFrame]]:
-        """Process multiple ZIP files with error handling.
+        """Process multiple ZIP files with error handling and memory management.
         
         Args:
             zip_paths: List of ZIP file paths to process
@@ -462,20 +598,32 @@ class FERCProcessor:
         failed_files = 0
         
         self.logger.info(f"Processing {len(zip_paths)} ZIP files")
+        self.monitor_memory("processing start")
         
         for i, zip_path in enumerate(zip_paths, 1):
             self.logger.info(f"Processing file {i}/{len(zip_paths)}: {os.path.basename(zip_path)}")
             
+            # Check memory before processing each file
+            if not self.should_process_more():
+                self.logger.warning(f"Memory usage too high, stopping processing at file {i}")
+                break
+            
             try:
                 dataframes = self.process_zipfile(zip_path, max_files)
                 
-                # Merge dataframes by table name
+                # Merge dataframes by table name - but keep them as separate DataFrames
+                # to avoid memory issues from large concatenations
                 for table_name, df in dataframes.items():
                     if table_name not in all_dataframes:
                         all_dataframes[table_name] = []
                     all_dataframes[table_name].append(df)
                 
                 successful_files += 1
+                self.monitor_memory(f"processed file {i}")
+                
+                # Force cleanup after each file
+                del dataframes
+                gc.collect()
                     
             except Exception as e:
                 failed_files += 1
@@ -491,6 +639,14 @@ class FERCProcessor:
         self.logger.info(
             f"Processing complete: {successful_files} successful, {failed_files} failed. "
             f"Found {len(all_dataframes)} table types."
+        )
+        
+        # Final memory cleanup
+        final_memory = self.get_memory_usage()
+        memory_delta = final_memory - self.initial_memory
+        self.logger.info(
+            f"Final memory usage: {format_bytes(final_memory)} "
+            f"[Δ{format_bytes(memory_delta, signed=True)} from start]"
         )
         
         return all_dataframes

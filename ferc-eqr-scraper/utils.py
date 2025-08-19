@@ -70,20 +70,98 @@ def get_file_size(filepath: str) -> int:
         return 0
 
 
-def format_bytes(bytes_count: int) -> str:
+def format_bytes(bytes_count: int, signed: bool = False) -> str:
     """Format bytes into human-readable string.
     
     Args:
         bytes_count: Number of bytes
+        signed: Whether to include +/- sign for positive/negative values
         
     Returns:
-        Formatted string (e.g., "1.5 GB")
+        Formatted string (e.g., "1.5 GB" or "+1.5 GB")
     """
+    sign = ""
+    if signed:
+        if bytes_count > 0:
+            sign = "+"
+        elif bytes_count < 0:
+            sign = "-"
+            bytes_count = abs(bytes_count)
+    
+    if bytes_count == 0:
+        return "0 B"
+    
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if bytes_count < 1024.0:
-            return f"{bytes_count:.1f} {unit}"
+            return f"{sign}{bytes_count:.1f} {unit}"
         bytes_count /= 1024.0
-    return f"{bytes_count:.1f} PB"
+    return f"{sign}{bytes_count:.1f} PB"
+
+
+def get_memory_info() -> dict:
+    """Get current memory usage information.
+    
+    Returns:
+        Dictionary with memory statistics
+    """
+    try:
+        import psutil
+        
+        # Virtual memory (system)
+        vm = psutil.virtual_memory()
+        
+        # Current process memory
+        process = psutil.Process()
+        pm = process.memory_info()
+        
+        return {
+            'system_total': vm.total,
+            'system_available': vm.available,
+            'system_used': vm.used,
+            'system_percent': vm.percent,
+            'process_rss': pm.rss,
+            'process_vms': pm.vms
+        }
+    except ImportError:
+        return {
+            'system_total': 0,
+            'system_available': 0,
+            'system_used': 0,
+            'system_percent': 0,
+            'process_rss': 0,
+            'process_vms': 0
+        }
+
+
+def log_memory_usage(logger: logging.Logger, context: str = "") -> None:
+    """Log current memory usage.
+    
+    Args:
+        logger: Logger instance to use
+        context: Optional context string for the log message
+    """
+    try:
+        mem_info = get_memory_info()
+        context_str = f" ({context})" if context else ""
+        
+        logger.info(
+            f"Memory usage{context_str}: "
+            f"Process: {format_bytes(mem_info['process_rss'])}, "
+            f"System: {mem_info['system_percent']:.1f}% "
+            f"({format_bytes(mem_info['system_used'])}/{format_bytes(mem_info['system_total'])})"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to log memory usage: {e}")
+
+
+def cleanup_memory() -> int:
+    """Force garbage collection and return number of objects collected.
+    
+    Returns:
+        Number of objects collected by garbage collector
+    """
+    import gc
+    return gc.collect()
 
 
 def validate_year_range(start_year: Optional[int], end_year: Optional[int]) -> tuple[int, int]:

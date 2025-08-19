@@ -16,15 +16,31 @@ class Config:
         self.DOWNLOAD_DIR = "ferc_data/downloads"
         self.EXTRACT_DIR = "ferc_data/extracted"
         
-        # Database settings
+        # Database settings - Production ready for Turso
         self.DATABASE_URI = os.environ.get("FERC_DATABASE_URI", "sqlite:///ferc_data.db")
+        self.TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL")
+        self.TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
+        
+        # Use Turso if available, otherwise fall back to local SQLite
+        if self.TURSO_DATABASE_URL and self.TURSO_AUTH_TOKEN:
+            self.DATABASE_URI = f"sqlite+libsql://{self.TURSO_DATABASE_URL}?authToken={self.TURSO_AUTH_TOKEN}"
         
         # Logging settings
         self.LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
         
         # Performance settings
-        self.CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "10000"))
+        self.CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "5000"))  # Reduced for better memory management
         self.MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
+        
+        # Memory management settings
+        self.MAX_MEMORY_USAGE_PCT = float(os.environ.get("MAX_MEMORY_USAGE_PCT", "50.0"))  # Reduced from 70% to 50%
+        self.BATCH_SIZE_XML_FILES = int(os.environ.get("BATCH_SIZE_XML_FILES", "5"))  # Reduced from 10 to 5
+        self.CONCAT_CHUNK_SIZE = int(os.environ.get("CONCAT_CHUNK_SIZE", "10"))  # Reduced from 25 to 10
+        
+        # Large file handling (in bytes)
+        self.MAX_TRANSACTION_ROWS_MEMORY = int(os.environ.get("MAX_TRANSACTION_ROWS_MEMORY", "50000"))  # Max transactions to hold in memory
+        self.LARGE_FILE_STREAMING_THRESHOLD = int(os.environ.get("LARGE_FILE_STREAMING_THRESHOLD", "20")) * 1024 * 1024  # 20MB instead of 50MB
+        self.EMERGENCY_MEMORY_THRESHOLD = float(os.environ.get("EMERGENCY_MEMORY_THRESHOLD", "80.0"))  # Stop processing if memory exceeds 80%
         
         # Network settings
         self.REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
@@ -62,12 +78,18 @@ class Config:
     
     def get_database_type(self) -> str:
         """Get the database type from the URI."""
-        if self.DATABASE_URI.startswith("sqlite"):
+        if "libsql://" in self.DATABASE_URI:
+            return "turso"
+        elif self.DATABASE_URI.startswith("sqlite"):
             return "sqlite"
         elif self.DATABASE_URI.startswith("postgresql"):
             return "postgresql"
         else:
             return "unknown"
+    
+    def is_turso(self) -> bool:
+        """Check if using Turso database."""
+        return self.get_database_type() == "turso"
     
     def is_postgresql(self) -> bool:
         """Check if using PostgreSQL database."""

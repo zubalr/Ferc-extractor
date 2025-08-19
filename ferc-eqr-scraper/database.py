@@ -39,8 +39,23 @@ class FERCDatabase:
                 'pool_pre_ping': True,  # Verify connections before use
             }
             
-            # Configure connection pooling for PostgreSQL
-            if config.is_postgresql():
+            # Configure for different database types
+            if config.is_turso():
+                self.logger.info("Configuring for Turso/LibSQL database")
+                # Turso-specific optimizations
+                engine_kwargs.update({
+                    'poolclass': QueuePool,
+                    'pool_size': 3,  # Smaller pool for serverless
+                    'max_overflow': 5,
+                    'pool_recycle': 300,  # Recycle connections more frequently
+                    'connect_args': {
+                        'check_same_thread': False,  # Allow multi-threading
+                        'timeout': 30,
+                    }
+                })
+                
+            elif config.is_postgresql():
+                self.logger.info("Configuring for PostgreSQL database")
                 engine_kwargs.update({
                     'poolclass': QueuePool,
                     'pool_size': self._connection_pool_size,
@@ -54,13 +69,23 @@ class FERCDatabase:
                     self.logger.info("Using psycopg2 driver for PostgreSQL")
                 except ImportError:
                     self.logger.warning("psycopg2 not available, falling back to default driver")
+                    
+            else:
+                # Local SQLite
+                engine_kwargs.update({
+                    'connect_args': {'check_same_thread': False}
+                })
             
             self.engine = create_engine(self.database_uri, **engine_kwargs)
             
             # Test connection
             self._test_connection()
             
-            self.logger.info(f"Database engine created: {config.get_database_type()}")
+            db_type = config.get_database_type()
+            self.logger.info(f"Database engine created: {db_type}")
+            
+            if config.is_turso():
+                self.logger.info("Connected to Turso database successfully")
             
         except Exception as e:
             self.logger.error(f"Failed to create database engine: {e}")
@@ -91,6 +116,30 @@ class FERCDatabase:
         }
         
         return info
+    
+    def is_sqlite(self) -> bool:
+        """Check if the database is SQLite.
+        
+        Returns:
+            True if database is SQLite, False otherwise
+        """
+        return config.is_sqlite()
+    
+    def is_turso(self) -> bool:
+        """Check if the database is Turso.
+        
+        Returns:
+            True if database is Turso, False otherwise
+        """
+        return config.is_turso()
+    
+    def is_postgresql(self) -> bool:
+        """Check if the database is PostgreSQL.
+        
+        Returns:
+            True if database is PostgreSQL, False otherwise
+        """
+        return config.is_postgresql()
     
     def execute_with_retry(self, operation, max_retries: int = None) -> Any:
         """Execute database operation with retry logic.
@@ -227,26 +276,295 @@ class FERCDatabase:
             self.logger.error(f"Error getting database info: {e}")
             return {'total_tables': 0, 'tables': {}, 'total_rows': 0}
     
-    def initialize_schema(self) -> None:
-        """Initialize database schema.
+    def create_production_schema(self) -> None:
+        """Create production-ready database schema with proper indexes and constraints.
         
-        This method ensures the database is ready for data loading.
-        Tables will be created dynamically when DataFrames are loaded.
+        Optimized for Turso/LibSQL with efficient indexes and foreign key constraints.
         """
+        try:
+            with self.engine.connect() as conn:
+                trans = conn.begin()
+                try:
+                    # Enable foreign key constraints (important for SQLite/Turso)
+                    conn.execute(text("PRAGMA foreign_keys = ON"))
+                    
+                    # Organizations table with proper constraints
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS organizations (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            organization_uid TEXT NOT NULL,
+                            cid TEXT,
+                            company_name TEXT,
+                            is_filer BOOLEAN DEFAULT FALSE,
+                            is_buyer BOOLEAN DEFAULT FALSE,
+                            is_seller BOOLEAN DEFAULT FALSE,
+                            transactions_reported_to_index_publisher BOOLEAN DEFAULT FALSE,
+                            filing_uid TEXT NOT NULL,
+                            year INTEGER NOT NULL,
+                            quarter INTEGER NOT NULL,
+                            period_type TEXT,
+                            filing_type TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(organization_uid, year, quarter)
+                        )
+                    """))
+                    
+                    # Contacts table with foreign key to organizations
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS contacts (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            contact_uid TEXT NOT NULL,
+                            organization_uid TEXT NOT NULL,
+                            first_name TEXT,
+                            last_name TEXT,
+                            display_name TEXT,
+                            title TEXT,
+                            phone TEXT,
+                            email TEXT,
+                            is_filer_contact BOOLEAN DEFAULT FALSE,
+                            is_buyer_contact BOOLEAN DEFAULT FALSE,
+                            is_seller_contact BOOLEAN DEFAULT FALSE,
+                            street1 TEXT,
+                            street2 TEXT,
+                            street3 TEXT,
+                            city TEXT,
+                            state TEXT,
+                            zip TEXT,
+                            country TEXT,
+                            filing_uid TEXT NOT NULL,
+                            year INTEGER NOT NULL,
+                            quarter INTEGER NOT NULL,
+                            period_type TEXT,
+                            filing_type TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(contact_uid, organization_uid, year, quarter),
+                            FOREIGN KEY (organization_uid, year, quarter) 
+                                REFERENCES organizations (organization_uid, year, quarter)
+                        )
+                    """))
+                    
+                    # Contracts table
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS contracts (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            contract_uid TEXT NOT NULL,
+                            seller_uid TEXT,
+                            buyer_uid TEXT,
+                            ferc_tariff_reference TEXT,
+                            contract_service_agreement TEXT,
+                            is_affiliate BOOLEAN DEFAULT FALSE,
+                            execution_date DATE,
+                            commencement_date DATE,
+                            termination_date DATE,
+                            extension_provision_description TEXT,
+                            filing_type_contract TEXT,
+                            filing_uid TEXT NOT NULL,
+                            year INTEGER NOT NULL,
+                            quarter INTEGER NOT NULL,
+                            period_type TEXT,
+                            filing_type TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(contract_uid, year, quarter),
+                            FOREIGN KEY (seller_uid, year, quarter) 
+                                REFERENCES organizations (organization_uid, year, quarter),
+                            FOREIGN KEY (buyer_uid, year, quarter) 
+                                REFERENCES organizations (organization_uid, year, quarter)
+                        )
+                    """))
+                    
+                    # Contract products table
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS contract_products (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            product_uid TEXT NOT NULL,
+                            contract_uid TEXT NOT NULL,
+                            product_type TEXT,
+                            product_name TEXT,
+                            product_class TEXT,
+                            term TEXT,
+                            increment TEXT,
+                            increment_peaking TEXT,
+                            quantity DECIMAL(15,4),
+                            units TEXT,
+                            podsl TEXT,
+                            begin_date DATE,
+                            end_date DATE,
+                            rate_description TEXT,
+                            rate_units TEXT,
+                            filing_type_product TEXT,
+                            filing_uid TEXT NOT NULL,
+                            year INTEGER NOT NULL,
+                            quarter INTEGER NOT NULL,
+                            period_type TEXT,
+                            filing_type TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(product_uid, contract_uid, year, quarter),
+                            FOREIGN KEY (contract_uid, year, quarter) 
+                                REFERENCES contracts (contract_uid, year, quarter)
+                        )
+                    """))
+                    
+                    # Transactions table
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS transactions (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            transaction_uid TEXT NOT NULL,
+                            contract_uid TEXT NOT NULL,
+                            transaction_group_ref TEXT,
+                            begin_date DATE,
+                            end_date DATE,
+                            time_zone TEXT,
+                            trade_date DATE,
+                            podba TEXT,
+                            podsl TEXT,
+                            transaction_class TEXT,
+                            term TEXT,
+                            increment TEXT,
+                            increment_peaking TEXT,
+                            product_name TEXT,
+                            quantity DECIMAL(15,4),
+                            standardized_quantity DECIMAL(15,4),
+                            price DECIMAL(15,4),
+                            standardized_price DECIMAL(15,4),
+                            rate_units TEXT,
+                            rate_type TEXT,
+                            total_transmission_charge DECIMAL(15,4),
+                            transaction_charge DECIMAL(15,4),
+                            filing_type_transaction TEXT,
+                            filing_uid TEXT NOT NULL,
+                            year INTEGER NOT NULL,
+                            quarter INTEGER NOT NULL,
+                            period_type TEXT,
+                            filing_type TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(transaction_uid, contract_uid, year, quarter),
+                            FOREIGN KEY (contract_uid, year, quarter) 
+                                REFERENCES contracts (contract_uid, year, quarter)
+                        )
+                    """))
+                    
+                    trans.commit()
+                    self.logger.info("Production schema created successfully")
+                    
+                except Exception as e:
+                    trans.rollback()
+                    raise e
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to create production schema: {e}")
+            raise
+
+    def create_production_indexes(self) -> None:
+        """Create production-ready indexes for optimal query performance."""
+        try:
+            with self.engine.connect() as conn:
+                trans = conn.begin()
+                try:
+                    indexes = [
+                        # Organizations indexes
+                        "CREATE INDEX IF NOT EXISTS idx_organizations_uid ON organizations (organization_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_organizations_year_quarter ON organizations (year, quarter)",
+                        "CREATE INDEX IF NOT EXISTS idx_organizations_company_name ON organizations (company_name)",
+                        "CREATE INDEX IF NOT EXISTS idx_organizations_is_seller ON organizations (is_seller) WHERE is_seller = 1",
+                        "CREATE INDEX IF NOT EXISTS idx_organizations_is_buyer ON organizations (is_buyer) WHERE is_buyer = 1",
+                        
+                        # Contacts indexes
+                        "CREATE INDEX IF NOT EXISTS idx_contacts_org_uid ON contacts (organization_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts (email) WHERE email IS NOT NULL",
+                        "CREATE INDEX IF NOT EXISTS idx_contacts_year_quarter ON contacts (year, quarter)",
+                        
+                        # Contracts indexes
+                        "CREATE INDEX IF NOT EXISTS idx_contracts_uid ON contracts (contract_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_contracts_seller ON contracts (seller_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_contracts_buyer ON contracts (buyer_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_contracts_year_quarter ON contracts (year, quarter)",
+                        "CREATE INDEX IF NOT EXISTS idx_contracts_execution_date ON contracts (execution_date)",
+                        "CREATE INDEX IF NOT EXISTS idx_contracts_is_affiliate ON contracts (is_affiliate) WHERE is_affiliate = 1",
+                        
+                        # Contract products indexes
+                        "CREATE INDEX IF NOT EXISTS idx_products_contract_uid ON contract_products (contract_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_products_type ON contract_products (product_type)",
+                        "CREATE INDEX IF NOT EXISTS idx_products_year_quarter ON contract_products (year, quarter)",
+                        "CREATE INDEX IF NOT EXISTS idx_products_begin_date ON contract_products (begin_date)",
+                        
+                        # Transactions indexes
+                        "CREATE INDEX IF NOT EXISTS idx_transactions_contract_uid ON transactions (contract_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_transactions_trade_date ON transactions (trade_date)",
+                        "CREATE INDEX IF NOT EXISTS idx_transactions_year_quarter ON transactions (year, quarter)",
+                        "CREATE INDEX IF NOT EXISTS idx_transactions_price ON transactions (price) WHERE price IS NOT NULL",
+                        "CREATE INDEX IF NOT EXISTS idx_transactions_quantity ON transactions (quantity) WHERE quantity IS NOT NULL",
+                        "CREATE INDEX IF NOT EXISTS idx_transactions_product_name ON transactions (product_name)",
+                        
+                        # Composite indexes for common queries
+                        "CREATE INDEX IF NOT EXISTS idx_organizations_composite ON organizations (year, quarter, is_seller, is_buyer)",
+                        "CREATE INDEX IF NOT EXISTS idx_contracts_composite ON contracts (year, quarter, seller_uid, buyer_uid)",
+                        "CREATE INDEX IF NOT EXISTS idx_transactions_composite ON transactions (year, quarter, trade_date, product_name)",
+                    ]
+                    
+                    for index_sql in indexes:
+                        conn.execute(text(index_sql))
+                    
+                    trans.commit()
+                    self.logger.info(f"Created {len(indexes)} production indexes")
+                    
+                except Exception as e:
+                    trans.rollback()
+                    raise e
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to create production indexes: {e}")
+            raise
+
+    def optimize_for_turso(self) -> None:
+        """Apply Turso/LibSQL specific optimizations."""
+        try:
+            with self.engine.connect() as conn:
+                # Turso/LibSQL optimizations
+                optimizations = [
+                    "PRAGMA journal_mode = WAL",  # Write-Ahead Logging for better concurrency
+                    "PRAGMA synchronous = NORMAL",  # Balance between safety and performance
+                    "PRAGMA cache_size = 10000",  # Increase cache size for better performance
+                    "PRAGMA temp_store = MEMORY",  # Store temporary data in memory
+                    "PRAGMA mmap_size = 268435456",  # Use memory-mapped I/O (256MB)
+                    "PRAGMA foreign_keys = ON",  # Enable foreign key constraints
+                ]
+                
+                for pragma in optimizations:
+                    try:
+                        conn.execute(text(pragma))
+                    except Exception as e:
+                        self.logger.warning(f"Optimization '{pragma}' failed: {e}")
+                
+                self.logger.info("Applied Turso/LibSQL optimizations")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to apply Turso optimizations: {e}")
+
+    def initialize_production_schema(self) -> None:
+        """Initialize complete production-ready schema with all optimizations."""
         try:
             # Test connection
             self._test_connection()
+            
+            # Apply Turso optimizations first
+            self.optimize_for_turso()
+            
+            # Create production schema
+            self.create_production_schema()
+            
+            # Create all indexes
+            self.create_production_indexes()
             
             # Get existing schema info
             existing_info = self.get_existing_data_info()
             
             self.logger.info(
-                f"Schema initialized: {existing_info['total_tables']} existing tables "
+                f"Production schema initialized: {existing_info['total_tables']} existing tables "
                 f"with {existing_info['total_rows']} total rows"
             )
             
         except Exception as e:
-            self.logger.error(f"Error initializing schema: {e}")
+            self.logger.error(f"Error initializing production schema: {e}")
             raise
     
     def get_dataframe_schema_info(self, df: pd.DataFrame, table_name: str) -> Dict[str, Any]:
@@ -299,21 +617,45 @@ class FERCDatabase:
                 if col_data.isnull().all():
                     continue
                 
+                # Handle datetime/timestamp columns first
+                if pd.api.types.is_datetime64_any_dtype(col_data):
+                    # Convert Pandas Timestamps to string format for SQLite compatibility
+                    if self.is_sqlite():
+                        # Convert to ISO format strings, keeping NaT as None
+                        optimized_df[column] = col_data.dt.strftime('%Y-%m-%d %H:%M:%S').where(col_data.notna(), None)
+                    # For other databases, keep as datetime
+                    else:
+                        optimized_df[column] = col_data
+                
+                # Handle object columns that might contain Timestamps
+                elif pd.api.types.is_object_dtype(col_data):
+                    # Check if any values are Timestamp objects
+                    sample_non_null = col_data.dropna()
+                    if len(sample_non_null) > 0:
+                        sample_value = sample_non_null.iloc[0]
+                        if isinstance(sample_value, pd.Timestamp):
+                            # Convert all Timestamp objects to strings
+                            if self.is_sqlite():
+                                optimized_df[column] = col_data.apply(
+                                    lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if isinstance(x, pd.Timestamp) else x
+                                )
+                            else:
+                                # For other databases, convert to proper datetime
+                                optimized_df[column] = pd.to_datetime(col_data, errors='coerce')
+                        else:
+                            # Convert to category if many repeated values
+                            unique_ratio = col_data.nunique() / len(col_data)
+                            if unique_ratio < 0.5 and col_data.nunique() < 1000:
+                                optimized_df[column] = col_data.astype('category')
+                
                 # Optimize numeric columns
-                if pd.api.types.is_numeric_dtype(col_data):
+                elif pd.api.types.is_numeric_dtype(col_data):
                     # Try to downcast integers
                     if pd.api.types.is_integer_dtype(col_data):
                         optimized_df[column] = pd.to_numeric(col_data, downcast='integer')
                     # Try to downcast floats
                     elif pd.api.types.is_float_dtype(col_data):
                         optimized_df[column] = pd.to_numeric(col_data, downcast='float')
-                
-                # Optimize string columns
-                elif pd.api.types.is_object_dtype(col_data):
-                    # Convert to category if many repeated values
-                    unique_ratio = col_data.nunique() / len(col_data)
-                    if unique_ratio < 0.5 and col_data.nunique() < 1000:
-                        optimized_df[column] = col_data.astype('category')
             
             memory_before = df.memory_usage(deep=True).sum()
             memory_after = optimized_df.memory_usage(deep=True).sum()
@@ -504,17 +846,124 @@ class FERCDatabase:
         if failed_tables:
             self.logger.warning(f"Failed tables: {failed_tables}")
     
-    def load_dataframes_batch(self, dataframes_batch: Dict[str, List[pd.DataFrame]], 
-                             if_exists: str = 'append') -> None:
-        """Load multiple batches of DataFrames (e.g., from multiple files).
+    def add_unique_constraints(self, table_name: str) -> None:
+        """Add unique constraints and indexes to tables for data integrity.
+        
+        Args:
+            table_name: Name of the table to add constraints to
+        """
+        try:
+            with self.engine.connect() as conn:
+                trans = conn.begin()
+                try:
+                    if table_name == 'organizations':
+                        # Create unique constraint on organization_uid + year + quarter
+                        conn.execute(text("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_org_unique 
+                            ON organizations (organization_uid, year, quarter)
+                        """))
+                        # Also create primary key if SQLite
+                        if self.is_sqlite():
+                            conn.execute(text("""
+                                CREATE UNIQUE INDEX IF NOT EXISTS idx_org_pk 
+                                ON organizations (rowid)
+                            """))
+                    
+                    elif table_name == 'contacts':
+                        conn.execute(text("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_unique 
+                            ON contacts (contact_uid, organization_uid, year, quarter)
+                        """))
+                    
+                    elif table_name == 'contracts':
+                        conn.execute(text("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_unique 
+                            ON contracts (contract_uid, year, quarter)
+                        """))
+                    
+                    elif table_name == 'contract_products':
+                        conn.execute(text("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_product_unique 
+                            ON contract_products (product_uid, contract_uid, year, quarter)
+                        """))
+                    
+                    elif table_name == 'transactions':
+                        conn.execute(text("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_transaction_unique 
+                            ON transactions (transaction_uid, contract_uid, year, quarter)
+                        """))
+                    
+                    # Add general indexes for common query patterns
+                    conn.execute(text(f"""
+                        CREATE INDEX IF NOT EXISTS idx_{table_name}_year_quarter 
+                        ON {table_name} (year, quarter)
+                    """))
+                    
+                    trans.commit()
+                    self.logger.debug(f"Added unique constraints and indexes to {table_name}")
+                    
+                except Exception as e:
+                    trans.rollback()
+                    raise e
+                    
+        except Exception as e:
+            self.logger.warning(f"Failed to add constraints to {table_name}: {e}")
+
+    def deduplicate_dataframe(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
+        """Remove duplicates from DataFrame based on table-specific logic.
+        
+        Args:
+            df: DataFrame to deduplicate
+            table_name: Name of the target table
+            
+        Returns:
+            Deduplicated DataFrame
+        """
+        if df.empty:
+            return df
+        
+        initial_count = len(df)
+        
+        # Define deduplication keys for each table
+        dedup_keys = {
+            'organizations': ['organization_uid', 'year', 'quarter'],
+            'contacts': ['contact_uid', 'organization_uid', 'year', 'quarter'],
+            'contracts': ['contract_uid', 'year', 'quarter'],
+            'contract_products': ['product_uid', 'contract_uid', 'year', 'quarter'],
+            'transactions': ['transaction_uid', 'contract_uid', 'year', 'quarter']
+        }
+        
+        if table_name in dedup_keys:
+            key_columns = dedup_keys[table_name]
+            # Only deduplicate if all key columns exist
+            available_keys = [col for col in key_columns if col in df.columns]
+            if len(available_keys) == len(key_columns):
+                df_dedup = df.drop_duplicates(subset=available_keys, keep='first')
+                removed_count = initial_count - len(df_dedup)
+                if removed_count > 0:
+                    self.logger.info(f"Removed {removed_count} duplicates from {table_name}")
+                return df_dedup
+            else:
+                self.logger.warning(f"Cannot deduplicate {table_name}: missing key columns {set(key_columns) - set(available_keys)}")
+        
+        return df
+
+    def load_dataframes_batch_streaming(self, dataframes_batch: Dict[str, List[pd.DataFrame]], 
+                                       if_exists: str = 'append', 
+                                       batch_size: Optional[int] = None) -> None:
+        """Load multiple batches of DataFrames with memory-efficient streaming.
         
         Args:
             dataframes_batch: Dictionary mapping table names to lists of DataFrames
             if_exists: How to behave if tables exist ('fail', 'replace', 'append')
+            batch_size: Size of chunks for processing (defaults to config.CHUNK_SIZE)
         """
         if not dataframes_batch:
             self.logger.warning("No DataFrame batches to load")
             return
+        
+        if batch_size is None:
+            batch_size = config.CHUNK_SIZE
         
         # Calculate totals
         total_tables = len(dataframes_batch)
@@ -523,36 +972,88 @@ class FERCDatabase:
         
         self.logger.info(
             f"Loading {total_tables} table types with {total_dataframes} DataFrames "
-            f"and {total_rows} total rows"
+            f"and {total_rows} total rows using streaming approach (batch_size={batch_size})"
         )
         
         successful_tables = []
         failed_tables = []
         
+        # Process each table separately with streaming
         for table_name, df_list in dataframes_batch.items():
             try:
-                # Concatenate all DataFrames for this table
-                if len(df_list) == 1:
-                    combined_df = df_list[0]
-                else:
-                    self.logger.info(f"Concatenating {len(df_list)} DataFrames for table {table_name}")
-                    combined_df = pd.concat(df_list, ignore_index=True)
+                self.logger.info(f"Processing table {table_name} with {len(df_list)} DataFrames")
                 
-                # Load the combined DataFrame
-                self.load_dataframe(combined_df, table_name, if_exists)
+                # Process DataFrames in chunks to avoid memory issues
+                total_processed = 0
+                
+                for i, df in enumerate(df_list, 1):
+                    self.logger.debug(f"Processing DataFrame {i}/{len(df_list)} for {table_name} ({len(df)} rows)")
+                    
+                    if df.empty:
+                        continue
+                    
+                    # Deduplicate the DataFrame
+                    df_dedup = self.deduplicate_dataframe(df, table_name)
+                    
+                    # Process in chunks if DataFrame is large
+                    if len(df_dedup) > batch_size:
+                        self.logger.info(f"Large DataFrame for {table_name}, processing in chunks of {batch_size}")
+                        
+                        for chunk_start in range(0, len(df_dedup), batch_size):
+                            chunk_end = min(chunk_start + batch_size, len(df_dedup))
+                            chunk_df = df_dedup.iloc[chunk_start:chunk_end].copy()
+                            
+                            # Load the chunk
+                            chunk_if_exists = if_exists if total_processed == 0 and chunk_start == 0 else 'append'
+                            self.load_dataframe(chunk_df, table_name, chunk_if_exists)
+                            total_processed += len(chunk_df)
+                            
+                            # Force garbage collection
+                            import gc
+                            del chunk_df
+                            gc.collect()
+                    else:
+                        # Load small DataFrame directly
+                        chunk_if_exists = if_exists if total_processed == 0 else 'append'
+                        self.load_dataframe(df_dedup, table_name, chunk_if_exists)
+                        total_processed += len(df_dedup)
+                    
+                    # Clean up memory
+                    import gc
+                    del df_dedup
+                    gc.collect()
+                
+                # Add unique constraints after loading all data for this table
+                self.add_unique_constraints(table_name)
+                
+                self.logger.info(f"Successfully loaded {total_processed} rows to table {table_name}")
                 successful_tables.append(table_name)
                 
             except Exception as e:
                 self.logger.error(f"Failed to load table {table_name}: {e}")
                 failed_tables.append(table_name)
+                # Force cleanup on error
+                import gc
+                gc.collect()
                 continue
         
         self.logger.info(
-            f"Batch loading complete: {len(successful_tables)} successful, {len(failed_tables)} failed"
+            f"Streaming batch loading complete: {len(successful_tables)} successful, {len(failed_tables)} failed"
         )
         
         if failed_tables:
             self.logger.warning(f"Failed tables: {failed_tables}")
+
+    def load_dataframes_batch(self, dataframes_batch: Dict[str, List[pd.DataFrame]], 
+                             if_exists: str = 'append') -> None:
+        """Load multiple batches of DataFrames (e.g., from multiple files).
+        
+        Args:
+            dataframes_batch: Dictionary mapping table names to lists of DataFrames
+            if_exists: How to behave if tables exist ('fail', 'replace', 'append')
+        """
+        # Use the new streaming approach by default
+        self.load_dataframes_batch_streaming(dataframes_batch, if_exists)
     
     def get_loading_progress(self, table_name: str, expected_rows: int) -> Dict[str, Any]:
         """Get progress information for data loading.
