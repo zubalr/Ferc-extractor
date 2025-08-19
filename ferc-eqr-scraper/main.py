@@ -63,6 +63,47 @@ def validate_date_parameters(start_year: Optional[int], end_year: Optional[int],
         raise click.BadParameter(str(e))
 
 
+def display_streaming_processing_summary(start_year: int, end_year: int, quarters: list[str], 
+                                        downloaded_files: list[str], processing_stats: dict) -> None:
+    """Display summary of streaming processing results.
+    
+    Args:
+        start_year: Starting year
+        end_year: Ending year
+        quarters: List of quarters
+        downloaded_files: List of downloaded file paths
+        processing_stats: Dictionary of processing statistics
+    """
+    logger = logging.getLogger("ferc_scraper")
+    
+    logger.info("=" * 60)
+    logger.info("STREAMING PROCESSING SUMMARY")
+    logger.info("=" * 60)
+    
+    # Date range summary
+    if start_year == end_year:
+        logger.info(f"Year: {start_year}")
+    else:
+        logger.info(f"Years: {start_year} - {end_year}")
+    logger.info(f"Quarters: {', '.join(quarters)}")
+    
+    # Processing summary
+    logger.info(f"ZIP Files: {processing_stats['zip_files_successful']} successful, {processing_stats['zip_files_failed']} failed")
+    logger.info(f"XML Files: {processing_stats['files_processed']} processed, {processing_stats['files_failed']} failed")
+    
+    # Data summary
+    total_records = sum(processing_stats[key] for key in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions'])
+    logger.info(f"Total Records: {total_records:,}")
+    
+    # Table details
+    for table_name in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions']:
+        count = processing_stats.get(table_name, 0)
+        if count > 0:
+            logger.info(f"  {table_name}: {count:,} records")
+    
+    logger.info("=" * 60)
+
+
 def display_processing_summary(start_year: int, end_year: int, quarters: list[str], 
                              downloaded_files: list[str], processed_data: dict) -> None:
     """Display summary of processing results.
@@ -208,9 +249,9 @@ def run_pipeline(start_year: Optional[int], end_year: Optional[int],
                     logger.error("No files were downloaded successfully")
                     sys.exit(1)
         
-        # Step 2: Process files
+        # Step 2: Process files with streaming approach
         if not download_only:
-            logger.info("Starting processing phase...")
+            logger.info("Starting streaming processing phase...")
             
             if process_only:
                 # Find existing files to process
@@ -226,51 +267,47 @@ def run_pipeline(start_year: Optional[int], end_year: Optional[int],
                 logger.info(f"Found {len(downloaded_files)} existing files to process")
             
             if dry_run:
-                logger.info(f"Would process {len(downloaded_files)} files")
+                logger.info(f"Would process {len(downloaded_files)} files with streaming approach")
                 if files is not None:
                     logger.info(f"Would limit processing to {files} nested ZIP files per main ZIP")
             else:
-                log_memory_usage(logger, "before processing")
-                processed_data = processor.process_multiple_files(downloaded_files, files)
-                log_memory_usage(logger, "after processing")
+                log_memory_usage(logger, "before streaming processing")
                 
-                if not processed_data:
-                    logger.warning("No data was extracted from the files")
+                # Use the new streaming processing approach
+                processing_stats = processor.process_multiple_files_streaming(
+                    downloaded_files, 
+                    database, 
+                    max_files=files,
+                    resume=resume
+                )
+                
+                log_memory_usage(logger, "after streaming processing")
+                
+                if not processing_stats or processing_stats.get('zip_files_successful', 0) == 0:
+                    logger.warning("No data was processed successfully")
+                else:
+                    total_records = sum(processing_stats[key] for key in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions'])
+                    logger.info(f"Streaming processing complete: {total_records} total records processed")
                 
                 # Force cleanup after processing
                 cleanup_memory()
                 log_memory_usage(logger, "after cleanup")
         
-        # Step 3: Load to database with streaming approach
-        if not download_only and not dry_run:
-            if processed_data:
-                logger.info("Starting database loading phase...")
-                log_memory_usage(logger, "before database loading")
-                
-                # Initialize production-ready database schema
-                database.initialize_production_schema()
-                
-                # Use the new streaming approach for memory efficiency
-                database.load_dataframes_batch_streaming(processed_data, batch_size=config.CHUNK_SIZE)
-                
-                # Get final database info
-                final_info = database.get_existing_data_info()
-                logger.info(f"Database now contains {final_info['total_rows']} total rows across {final_info['total_tables']} tables")
-                
-                # Display table-specific counts
-                for table_name, table_info in final_info['tables'].items():
-                    logger.info(f"  {table_name}: {table_info['row_count']} rows")
-                
-                log_memory_usage(logger, "after database loading")
-            else:
-                logger.info("No data to load to database")
+        # Step 3: Database loading is now handled within streaming processing
+        # No separate database loading phase needed
         
         # Display summary
         if not dry_run:
-            display_processing_summary(
-                validated_start, validated_end, validated_quarters,
-                downloaded_files, processed_data
-            )
+            if 'processing_stats' in locals() and processing_stats:
+                display_streaming_processing_summary(
+                    validated_start, validated_end, validated_quarters,
+                    downloaded_files, processing_stats
+                )
+            else:
+                display_processing_summary(
+                    validated_start, validated_end, validated_quarters,
+                    downloaded_files, {}
+                )
         
         logger.info("Pipeline completed successfully!")
         

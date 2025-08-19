@@ -1180,6 +1180,185 @@ class EQRXMLParser:
         
         return df
     
+    def parse_single_file(self, xml_file_path: str, max_records_per_table: Optional[int] = None) -> Dict[str, pd.DataFrame]:
+        """Parse a single XML file with memory-efficient approach.
+        
+        Args:
+            xml_file_path: Path to XML file to parse
+            max_records_per_table: Maximum records to extract per table (for testing/limiting)
+            
+        Returns:
+            Dictionary of DataFrames with extracted data
+        """
+        file_size = os.path.getsize(xml_file_path)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        self.logger.info(f"Processing {os.path.basename(xml_file_path)} ({file_size_mb:.1f}MB)")
+        
+        # Use streaming parser for large files
+        if file_size > 100 * 1024 * 1024:  # 100MB threshold
+            self.logger.info("Using memory-efficient streaming parser")
+            return self._parse_file_streaming(xml_file_path, max_records_per_table)
+        else:
+            self.logger.info("Using standard parser for smaller file")
+            return self._parse_file_standard(xml_file_path, max_records_per_table)
+    
+    def _parse_file_streaming(self, xml_file_path: str, max_records_per_table: Optional[int] = None) -> Dict[str, pd.DataFrame]:
+        """Parse XML file using streaming approach for large files.
+        
+        Args:
+            xml_file_path: Path to XML file
+            max_records_per_table: Maximum records per table
+            
+        Returns:
+            Dictionary of DataFrames
+        """
+        # Initialize data collectors
+        organizations_data = []
+        contacts_data = []
+        contracts_data = []
+        contract_products_data = []
+        transactions_data = []
+        
+        # Counters for limiting records if needed
+        counters = {
+            'organizations': 0,
+            'contacts': 0,
+            'contracts': 0,
+            'contract_products': 0,
+            'transactions': 0
+        }
+        
+        try:
+            # Parse with iterparse for memory efficiency
+            context = ET.iterparse(xml_file_path, events=('start', 'end'))
+            context = iter(context)
+            event, root = next(context)
+            
+            filing_metadata = None
+            current_organization = None
+            
+            for event, elem in context:
+                if event == 'end':
+                    # Extract filing metadata first
+                    if elem.tag.endswith('EqrFiling') or elem.tag == 'EqrFiling':
+                        filing_metadata = self._extract_filing_metadata(elem)
+                    
+                    # Process organization elements
+                    elif (elem.tag.endswith('Organization') or elem.tag == 'Organization') and filing_metadata:
+                        if max_records_per_table is None or counters['organizations'] < max_records_per_table:
+                            org_data = self._extract_organization_data(elem, filing_metadata)
+                            organizations_data.append(org_data)
+                            current_organization = org_data
+                            counters['organizations'] += 1
+                        
+                        # Process contacts within organization
+                        for contact_elem in elem.findall('.//eqr:Contact', self.namespace) or elem.findall('.//Contact'):
+                            if max_records_per_table is None or counters['contacts'] < max_records_per_table:
+                                contact_data = self._extract_contact_data(contact_elem, filing_metadata, current_organization['organization_uid'])
+                                contacts_data.append(contact_data)
+                                counters['contacts'] += 1
+                    
+                    # Process contract elements
+                    elif (elem.tag.endswith('Contract') or elem.tag == 'Contract') and filing_metadata:
+                        if max_records_per_table is None or counters['contracts'] < max_records_per_table:
+                            contract_data = self._extract_contract_data(elem, filing_metadata)
+                            contracts_data.append(contract_data)
+                            counters['contracts'] += 1
+                            
+                            # Process contract products
+                            for product_elem in elem.findall('.//eqr:ContractProduct', self.namespace) or elem.findall('.//ContractProduct'):
+                                if max_records_per_table is None or counters['contract_products'] < max_records_per_table:
+                                    product_data = self._extract_contract_product_data(product_elem, filing_metadata, contract_data['contract_uid'])
+                                    contract_products_data.append(product_data)
+                                    counters['contract_products'] += 1
+                            
+                            # Process transactions
+                            for transaction_elem in elem.findall('.//eqr:Transaction', self.namespace) or elem.findall('.//Transaction'):
+                                if max_records_per_table is None or counters['transactions'] < max_records_per_table:
+                                    transaction_data = self._extract_transaction_data(transaction_elem, filing_metadata, contract_data['contract_uid'])
+                                    transactions_data.append(transaction_data)
+                                    counters['transactions'] += 1
+                    
+                    # Clear processed element to save memory
+                    elem.clear()
+                    
+                    # Periodic memory cleanup during processing
+                    if (counters['transactions'] + counters['contracts']) % 1000 == 0:
+                        root.clear()  # Clear the root to free memory
+            
+            # Create DataFrames from collected data
+            dataframes = {}
+            
+            if organizations_data:
+                dataframes['organizations'] = pd.DataFrame(organizations_data)
+            
+            if contacts_data:
+                dataframes['contacts'] = pd.DataFrame(contacts_data)
+            
+            if contracts_data:
+                dataframes['contracts'] = pd.DataFrame(contracts_data)
+            
+            if contract_products_data:
+                dataframes['contract_products'] = pd.DataFrame(contract_products_data)
+            
+            if transactions_data:
+                dataframes['transactions'] = pd.DataFrame(transactions_data)
+            
+            # Log extraction results
+            total_records = sum(len(df) for df in dataframes.values())
+            self.logger.info(f"Streaming extraction complete: {len(dataframes)} tables, {total_records} total records")
+            
+            for table_name, df in dataframes.items():
+                self.logger.debug(f"  {table_name}: {len(df)} records")
+            
+            return dataframes
+            
+        except Exception as e:
+            self.logger.error(f"Error in streaming XML parsing: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            return {}
+    
+    def _parse_file_standard(self, xml_file_path: str, max_records_per_table: Optional[int] = None) -> Dict[str, pd.DataFrame]:
+        """Parse XML file using standard approach for smaller files.
+        
+        Args:
+            xml_file_path: Path to XML file
+            max_records_per_table: Maximum records per table
+            
+        Returns:
+            Dictionary of DataFrames
+        """
+        try:
+            # Use the existing parse_xml_file method but with record limiting
+            dataframes = self.parse_xml_file(xml_file_path)
+            
+            # Apply record limiting if specified
+            if max_records_per_table is not None:
+                for table_name, df in dataframes.items():
+                    if len(df) > max_records_per_table:
+                        dataframes[table_name] = df.head(max_records_per_table)
+                        self.logger.info(f"Limited {table_name} to {max_records_per_table} records")
+            
+            return dataframes
+            
+        except Exception as e:
+            self.logger.error(f"Error in standard XML parsing: {e}")
+            return {}
+    
+    def clear_cache(self) -> None:
+        """Clear any cached data to free memory."""
+        # Clear any internal caches or temporary data
+        if hasattr(self, '_cached_namespaces'):
+            delattr(self, '_cached_namespaces')
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        self.logger.debug("Parser cache cleared")
+    
     def parse_multiple_files(self, xml_files: List[str]) -> Dict[str, List[pd.DataFrame]]:
         """Parse multiple XML files and combine results.
         

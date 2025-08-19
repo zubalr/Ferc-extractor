@@ -743,7 +743,223 @@ class FERCDatabase:
         except Exception as e:
             self.logger.error(f"Error during database cleanup: {e}")
     
-    def load_dataframe(self, df: pd.DataFrame, table_name: str, if_exists: str = 'append') -> None:
+    def enable_performance_mode(self) -> None:
+        """Enable high-performance mode for bulk loading."""
+        try:
+            with self.engine.connect() as conn:
+                if self.is_sqlite():
+                    # SQLite optimizations for bulk loading
+                    conn.execute(text("PRAGMA synchronous = OFF"))  # Faster writes, less safe
+                    conn.execute(text("PRAGMA journal_mode = WAL"))  # Better concurrency
+                    conn.execute(text("PRAGMA cache_size = -64000"))  # 64MB cache
+                    conn.execute(text("PRAGMA temp_store = MEMORY"))  # Use memory for temp
+                    conn.execute(text("PRAGMA mmap_size = 268435456"))  # 256MB mmap
+                    self.logger.info("SQLite performance mode enabled")
+                conn.commit()
+        except Exception as e:
+            self.logger.warning(f"Failed to enable performance mode: {e}")
+    
+    def disable_performance_mode(self) -> None:
+        """Disable performance mode and restore safe settings."""
+        try:
+            with self.engine.connect() as conn:
+                if self.is_sqlite():
+                    conn.execute(text("PRAGMA synchronous = FULL"))  # Safe writes
+                    conn.execute(text("PRAGMA cache_size = -2000"))  # Default cache
+                    self.logger.info("SQLite performance mode disabled")
+                conn.commit()
+        except Exception as e:
+            self.logger.warning(f"Failed to disable performance mode: {e}")
+    
+    def drop_all_indexes(self) -> None:
+        """Drop all indexes for faster bulk loading."""
+        try:
+            with self.engine.connect() as conn:
+                # Get all indexes
+                if self.is_sqlite():
+                    result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"))
+                    indexes = [row[0] for row in result]
+                    
+                    for index_name in indexes:
+                        conn.execute(text(f"DROP INDEX IF EXISTS {index_name}"))
+                    
+                    self.logger.info(f"Dropped {len(indexes)} indexes for bulk loading")
+                conn.commit()
+        except Exception as e:
+            self.logger.warning(f"Failed to drop indexes: {e}")
+    
+    def recreate_all_indexes(self) -> None:
+        """Recreate all indexes after bulk loading."""
+        try:
+            self.logger.info("Recreating indexes after bulk loading...")
+            self.create_production_indexes()
+        except Exception as e:
+            self.logger.error(f"Failed to recreate indexes: {e}")
+    
+    def load_dataframe_streaming(self, df: pd.DataFrame, table_name: str, 
+                                batch_size: int = None) -> None:
+        """Load DataFrame to database with streaming approach - optimized for memory efficiency.
+        
+        Args:
+            df: DataFrame to load
+            table_name: Target table name
+            batch_size: Number of rows per batch (defaults to config.CHUNK_SIZE)
+        """
+        if df.empty:
+            self.logger.debug(f"Skipping empty DataFrame for table {table_name}")
+            return
+        
+        batch_size = batch_size or config.CHUNK_SIZE
+        
+        try:
+            # Optimize DataFrame for database
+            optimized_df = self.optimize_dataframe_dtypes(df)
+            
+            # Remove duplicates if this is not the first load
+            if self.table_exists(table_name):
+                optimized_df = self.remove_duplicates_streaming(optimized_df, table_name)
+                if optimized_df.empty:
+                    self.logger.debug(f"All records in {table_name} were duplicates, skipping")
+                    return
+            
+            total_rows = len(optimized_df)
+            self.logger.info(f"Loading {total_rows} rows to table '{table_name}' in batches of {batch_size}")
+            
+            # Process in batches to manage memory
+            rows_loaded = 0
+            for start_idx in range(0, total_rows, batch_size):
+                end_idx = min(start_idx + batch_size, total_rows)
+                batch_df = optimized_df.iloc[start_idx:end_idx].copy()
+                
+                try:
+                    # Load batch to database
+                    batch_df.to_sql(
+                        name=table_name,
+                        con=self.engine,
+                        if_exists='append',
+                        index=False,
+                        method='multi',  # Use multi-row inserts for better performance
+                        chunksize=min(1000, len(batch_df))  # Further chunk large batches
+                    )
+                    
+                    rows_loaded += len(batch_df)
+                    
+                    # Log progress for large datasets
+                    if total_rows > 10000:
+                        progress_pct = (rows_loaded / total_rows) * 100
+                        self.logger.debug(f"Loaded {rows_loaded}/{total_rows} rows ({progress_pct:.1f}%) to {table_name}")
+                    
+                    # Clean up batch DataFrame
+                    del batch_df
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to load batch {start_idx}-{end_idx} to {table_name}: {e}")
+                    del batch_df
+                    raise
+            
+            self.logger.info(f"Successfully loaded {rows_loaded} rows to table '{table_name}'")
+            
+            # Clean up optimized DataFrame
+            del optimized_df
+            
+        except Exception as e:
+            self.logger.error(f"Error loading DataFrame to {table_name}: {e}")
+            raise
+    
+    def remove_duplicates_streaming(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
+        """Remove duplicates by checking against existing database records.
+        
+        Args:
+            df: DataFrame to deduplicate
+            table_name: Target table name
+            
+        Returns:
+            DataFrame with duplicates removed
+        """
+        try:
+            if not self.table_exists(table_name):
+                return df
+            
+            # Get unique constraint columns for this table
+            unique_cols = self.get_unique_columns(table_name)
+            if not unique_cols:
+                # If no unique columns defined, use all columns
+                return df.drop_duplicates()
+            
+            # Check for existing records in batches to manage memory
+            batch_size = 5000
+            unique_df = df.copy()
+            
+            for start_idx in range(0, len(df), batch_size):
+                end_idx = min(start_idx + batch_size, len(df))
+                batch_df = df.iloc[start_idx:end_idx]
+                
+                # Build query to check for existing records
+                conditions = []
+                for _, row in batch_df.iterrows():
+                    row_conditions = []
+                    for col in unique_cols:
+                        if col in row.index and pd.notna(row[col]):
+                            value = row[col]
+                            if isinstance(value, str):
+                                escaped_value = value.replace("'", "''")
+                                row_conditions.append(f"{col} = '{escaped_value}'")
+                            else:
+                                row_conditions.append(f"{col} = {value}")
+                    
+                    if row_conditions:
+                        conditions.append("(" + " AND ".join(row_conditions) + ")")
+                
+                if conditions:
+                    query = f"SELECT {', '.join(unique_cols)} FROM {table_name} WHERE " + " OR ".join(conditions)
+                    
+                    try:
+                        with self.engine.connect() as conn:
+                            existing_records = pd.read_sql(query, conn)
+                        
+                        if not existing_records.empty:
+                            # Remove matching records
+                            merge_cols = [col for col in unique_cols if col in batch_df.columns]
+                            if merge_cols:
+                                batch_df = batch_df.merge(existing_records[merge_cols], on=merge_cols, how='left', indicator=True)
+                                batch_df = batch_df[batch_df['_merge'] == 'left_only'].drop('_merge', axis=1)
+                        
+                        # Update the unique_df with deduplicated batch
+                        unique_df.iloc[start_idx:end_idx] = batch_df
+                        
+                    except Exception as e:
+                        self.logger.debug(f"Error checking duplicates for batch: {e}")
+                        continue
+            
+            removed_count = len(df) - len(unique_df.dropna())
+            if removed_count > 0:
+                self.logger.info(f"Removed {removed_count} duplicates from {table_name}")
+            
+            return unique_df.dropna()
+            
+        except Exception as e:
+            self.logger.warning(f"Error removing duplicates for {table_name}: {e}")
+            return df.drop_duplicates()  # Fall back to simple deduplication
+    
+    def get_unique_columns(self, table_name: str) -> list[str]:
+        """Get the unique constraint columns for a table.
+        
+        Args:
+            table_name: Name of the table
+            
+        Returns:
+            List of column names that form unique constraints
+        """
+        # Define unique constraints for each table
+        unique_constraints = {
+            'organizations': ['organization_uid', 'year', 'quarter'],
+            'contacts': ['contact_uid', 'organization_uid', 'year', 'quarter'],
+            'contracts': ['contract_uid', 'year', 'quarter'],
+            'contract_products': ['product_uid', 'contract_uid', 'year', 'quarter'],
+            'transactions': ['transaction_uid', 'contract_uid', 'year', 'quarter']
+        }
+        
+        return unique_constraints.get(table_name, [])
         """Load a single DataFrame into the database with chunked processing.
         
         Args:

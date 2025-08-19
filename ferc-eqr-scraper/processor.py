@@ -4,26 +4,105 @@ import os
 import shutil
 import zipfile
 import gc
+import json
 import psutil
 from pathlib import Path
 from typing import Dict, Optional, Generator, Iterator
 import pandas as pd
 import logging
 from tqdm import tqdm
+from datetime import datetime
 
 from settings import config
 from utils import ensure_directory, format_bytes, get_file_size
 from eqr_parser import EQRXMLParser
 
 
+class ProcessingProgress:
+    """Track processing progress and allow resuming."""
+    
+    def __init__(self, progress_file: str = "processing_progress.json"):
+        self.progress_file = progress_file
+        self.data = self.load_progress()
+    
+    def load_progress(self) -> Dict:
+        """Load existing progress data."""
+        if os.path.exists(self.progress_file):
+            try:
+                with open(self.progress_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {
+            'completed_files': [],
+            'failed_files': [],
+            'last_updated': None,
+            'total_records_processed': 0,
+            'session_stats': {}
+        }
+    
+    def save_progress(self):
+        """Save current progress to file."""
+        self.data['last_updated'] = datetime.now().isoformat()
+        try:
+            with open(self.progress_file, 'w') as f:
+                json.dump(self.data, f, indent=2)
+        except Exception as e:
+            logging.getLogger("ferc_scraper.processor").warning(f"Failed to save progress: {e}")
+    
+    def mark_file_completed(self, file_path: str, stats: Dict[str, int]):
+        """Mark a file as completed with its statistics."""
+        if file_path not in self.data['completed_files']:
+            self.data['completed_files'].append(file_path)
+        
+        # Add to session stats
+        total_records = sum(stats[key] for key in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions'])
+        self.data['total_records_processed'] += total_records
+        self.data['session_stats'][file_path] = {
+            'stats': stats,
+            'completed_at': datetime.now().isoformat(),
+            'total_records': total_records
+        }
+        self.save_progress()
+    
+    def mark_file_failed(self, file_path: str, error: str):
+        """Mark a file as failed with error information."""
+        if file_path not in self.data['failed_files']:
+            self.data['failed_files'].append(file_path)
+        
+        self.data['session_stats'][file_path] = {
+            'failed_at': datetime.now().isoformat(),
+            'error': str(error)
+        }
+        self.save_progress()
+    
+    def is_file_completed(self, file_path: str) -> bool:
+        """Check if a file has already been processed."""
+        return file_path in self.data['completed_files']
+    
+    def get_remaining_files(self, all_files: list[str]) -> list[str]:
+        """Get list of files that still need to be processed."""
+        return [f for f in all_files if not self.is_file_completed(f)]
+    
+    def get_stats(self) -> Dict:
+        """Get processing statistics."""
+        return {
+            'completed_files': len(self.data['completed_files']),
+            'failed_files': len(self.data['failed_files']),
+            'total_records_processed': self.data['total_records_processed'],
+            'last_updated': self.data['last_updated']
+        }
+
+
 class FERCProcessor:
     """Memory-efficient processor for FERC EQR ZIP files and XML data extraction."""
     
-    def __init__(self, max_memory_usage_pct: float = 70.0):
+    def __init__(self, max_memory_usage_pct: float = 70.0, enable_progress_tracking: bool = True):
         """Initialize the processor with memory monitoring.
         
         Args:
             max_memory_usage_pct: Maximum memory usage percentage before triggering cleanup
+            enable_progress_tracking: Whether to enable progress tracking and resuming
         """
         self.logger = logging.getLogger("ferc_scraper.processor")
         self.eqr_parser = EQRXMLParser()
@@ -32,6 +111,14 @@ class FERCProcessor:
         # Memory monitoring
         self.process = psutil.Process()
         self.initial_memory = self.get_memory_usage()
+        
+        # Progress tracking
+        self.enable_progress_tracking = enable_progress_tracking
+        if enable_progress_tracking:
+            self.progress = ProcessingProgress()
+            self.logger.info(f"Progress tracking enabled. {self.progress.get_stats()}")
+        else:
+            self.progress = None
         
         # Ensure directories exist
         ensure_directory(config.EXTRACT_DIR)
@@ -96,8 +183,88 @@ class FERCProcessor:
         # Normal memory limit check
         if current_pct > self.max_memory_usage_pct:
             self.logger.warning(f"Memory usage too high ({current_pct:.1f}%), should pause processing")
-            return False
+            # Try aggressive cleanup before giving up
+            self.aggressive_memory_cleanup()
+            
+            # Check again after cleanup
+            new_pct = self.get_memory_usage_pct()
+            if new_pct > self.max_memory_usage_pct:
+                return False
+        
         return True
+    
+    def aggressive_memory_cleanup(self) -> None:
+        """Perform aggressive memory cleanup when memory usage is high."""
+        self.logger.info("Performing aggressive memory cleanup...")
+        
+        # Multiple rounds of garbage collection
+        for i in range(3):
+            collected = gc.collect()
+            self.logger.debug(f"GC round {i+1}: collected {collected} objects")
+        
+        # Clear any cached data in the parser
+        if hasattr(self.eqr_parser, 'clear_cache'):
+            self.eqr_parser.clear_cache()
+        
+        # Force immediate cleanup of temporary variables (Linux/Unix only)
+        try:
+            import ctypes
+            import platform
+            if platform.system() in ['Linux', 'Unix']:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            # Not available on all systems, ignore silently
+            pass
+        
+        current_pct = self.get_memory_usage_pct()
+        self.logger.info(f"Memory after aggressive cleanup: {current_pct:.1f}%")
+    
+    def check_system_resources(self) -> bool:
+        """Check if system has enough resources to continue processing.
+        
+        Returns:
+            True if system is healthy, False if we should pause
+        """
+        try:
+            # Check memory
+            memory = psutil.virtual_memory()
+            if memory.percent > 85:  # System memory over 85%
+                self.logger.warning(f"System memory usage high: {memory.percent:.1f}%")
+                return False
+            
+            # Check disk space (need space for database growth)
+            disk = psutil.disk_usage('.')
+            if disk.percent > 90:  # Disk over 90% full
+                self.logger.warning(f"Disk space low: {disk.percent:.1f}% used")
+                return False
+            
+            # Check CPU load (don't process if system is overloaded)
+            cpu_percent = psutil.cpu_percent(interval=1)
+            if cpu_percent > 90:
+                self.logger.warning(f"CPU usage high: {cpu_percent:.1f}%")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            self.logger.warning(f"Error checking system resources: {e}")
+            return True  # Continue processing if we can't check
+    
+    def pause_for_memory_recovery(self, duration: int = 5) -> None:
+        """Pause processing to allow system memory recovery.
+        
+        Args:
+            duration: Seconds to pause
+        """
+        self.logger.info(f"Pausing processing for {duration} seconds to allow memory recovery...")
+        import time
+        time.sleep(duration)
+        
+        # Perform cleanup during pause
+        self.aggressive_memory_cleanup()
+        
+        new_pct = self.get_memory_usage_pct()
+        self.logger.info(f"Memory after pause: {new_pct:.1f}%")
     
     def extract_archive(self, zip_path: str, extract_dir: Optional[str] = None) -> str:
         """Extract ZIP archive to specified directory.
@@ -506,20 +673,31 @@ class FERCProcessor:
             self.logger.error(f"Error validating DataFrames: {e}")
             return False
     
-    def process_zipfile(self, zip_path: str, max_files: Optional[int] = None) -> Dict[str, pd.DataFrame]:
-        """Process a FERC EQR ZIP file and extract data.
+    def process_zipfile_streaming(self, zip_path: str, database: 'FERCDatabase', max_files: Optional[int] = None) -> Dict[str, int]:
+        """Process a FERC EQR ZIP file with streaming approach - no DataFrame accumulation.
         
         Args:
             zip_path: Path to ZIP file to process
+            database: Database instance for immediate persistence
             max_files: Maximum number of nested ZIP files to process (None for all)
             
         Returns:
-            Dictionary of DataFrames with extracted data
+            Dictionary with processing statistics
             
         Raises:
             Exception: If processing fails
         """
-        self.logger.info(f"Processing ZIP file: {zip_path}")
+        self.logger.info(f"Processing ZIP file (streaming): {zip_path}")
+        
+        stats = {
+            'organizations': 0,
+            'contacts': 0,
+            'contracts': 0,
+            'contract_products': 0,
+            'transactions': 0,
+            'files_processed': 0,
+            'files_failed': 0
+        }
         
         # Extract the archive
         extract_dir = self.extract_archive(zip_path)
@@ -530,23 +708,215 @@ class FERCProcessor:
                 raise ValueError(f"Invalid or missing files in {zip_path}")
             
             # Get extraction statistics
-            stats = self.get_extraction_stats(extract_dir)
+            extraction_stats = self.get_extraction_stats(extract_dir)
             
-            # Parse XML data using FERC XBRL extractor
-            dataframes = self.parse_xml_data(extract_dir, max_files)
-            
-            # Validate extracted data
-            if not self.validate_dataframes(dataframes):
-                self.logger.warning(f"Data validation issues in {zip_path}")
-            
-            return dataframes
-            
+            # Process XML files with streaming approach
+            xml_extract_dir = None
+            try:
+                # Check if we have nested ZIP files that need to be extracted
+                zip_files = [f for f in self.get_extracted_files(extract_dir) if f.lower().endswith('.zip')]
+                xml_files = [f for f in self.get_extracted_files(extract_dir) if f.lower().endswith('.xml')]
+                
+                if zip_files and not xml_files:
+                    # We have nested ZIP files, extract them first
+                    xml_extract_dir = self.extract_nested_zip_files(extract_dir, max_files)
+                    # Find all XML files in the extracted directory
+                    xml_files = []
+                    for root, dirs, filenames in os.walk(xml_extract_dir):
+                        for filename in filenames:
+                            if filename.lower().endswith('.xml'):
+                                xml_files.append(os.path.join(root, filename))
+                else:
+                    xml_extract_dir = extract_dir
+                
+                if not xml_files:
+                    self.logger.warning("No XML files found for processing")
+                    return stats
+                
+                self.logger.info(f"Found {len(xml_files)} XML files to process with streaming")
+                self.logger.info(f"XML files are located in: {xml_extract_dir}")
+                
+                # Process files one by one with immediate database insertion
+                for i, xml_file in enumerate(xml_files, 1):
+                    if not self.should_process_more():
+                        self.logger.warning("Memory usage too high, stopping processing")
+                        break
+                    
+                    try:
+                        self.logger.info(f"Processing XML file {i}/{len(xml_files)}: {os.path.basename(xml_file)}")
+                        
+                        # Parse single file and get DataFrames
+                        file_dataframes = self.eqr_parser.parse_single_file(xml_file)
+                        
+                        if file_dataframes:
+                            # Immediately load each table to database
+                            for table_name, df in file_dataframes.items():
+                                if df is not None and not df.empty:
+                                    try:
+                                        database.load_dataframe_streaming(df, table_name)
+                                        stats[table_name] += len(df)
+                                        self.logger.debug(f"Loaded {len(df)} {table_name} records to database")
+                                    except Exception as e:
+                                        self.logger.error(f"Failed to load {table_name} data: {e}")
+                                        continue
+                            
+                            # Explicitly delete the DataFrames and force cleanup
+                            del file_dataframes
+                            gc.collect()
+                            
+                            stats['files_processed'] += 1
+                        else:
+                            self.logger.warning(f"No data extracted from {xml_file}")
+                            
+                    except Exception as e:
+                        self.logger.error(f"Error processing XML file {xml_file}: {e}")
+                        stats['files_failed'] += 1
+                        continue
+                    
+                    # Monitor memory after each file
+                    self.monitor_memory(f"processed file {i}/{len(xml_files)}")
+                
+                # Log final statistics
+                total_records = sum(stats[key] for key in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions'])
+                self.logger.info(
+                    f"Streaming processing complete: {stats['files_processed']} files processed, "
+                    f"{stats['files_failed']} failed, {total_records} total records"
+                )
+                
+                return stats
+                
+            except Exception as e:
+                self.logger.error(f"Error during streaming XML processing: {e}")
+                raise
+                
         except Exception as e:
             self.logger.error(f"Error processing {zip_path}: {e}")
             raise
         finally:
             # Always clean up temporary files
             self.cleanup_temp_files(extract_dir)
+    
+    def process_multiple_files_streaming(self, zip_paths: list[str], database: 'FERCDatabase', 
+                                        max_files: Optional[int] = None, resume: bool = False) -> Dict[str, int]:
+        """Process multiple ZIP files with streaming approach - no memory accumulation.
+        
+        Args:
+            zip_paths: List of ZIP file paths to process
+            database: Database instance for immediate persistence
+            max_files: Maximum number of nested ZIP files to process per main ZIP (None for all)
+            resume: Whether to resume from previous progress
+            
+        Returns:
+            Dictionary with aggregated processing statistics
+        """
+        # Filter files based on resume option
+        if resume and self.progress:
+            remaining_files = self.progress.get_remaining_files(zip_paths)
+            if remaining_files != zip_paths:
+                self.logger.info(f"Resuming processing: {len(remaining_files)} files remaining out of {len(zip_paths)} total")
+                zip_paths = remaining_files
+            else:
+                self.logger.info("No previous progress found or all files already processed")
+        
+        total_stats = {
+            'organizations': 0,
+            'contacts': 0,
+            'contracts': 0,
+            'contract_products': 0,
+            'transactions': 0,
+            'files_processed': 0,
+            'files_failed': 0,
+            'zip_files_successful': 0,
+            'zip_files_failed': 0
+        }
+        
+        if not zip_paths:
+            self.logger.info("No files to process")
+            return total_stats
+        
+        self.logger.info(f"Processing {len(zip_paths)} ZIP files with streaming approach")
+        self.monitor_memory("streaming processing start")
+        
+        # Enable database performance mode for bulk loading
+        self.logger.info("Enabling database performance mode for bulk loading")
+        database.enable_performance_mode()
+        database.drop_all_indexes()
+        
+        try:
+            for i, zip_path in enumerate(zip_paths, 1):
+                self.logger.info(f"Processing ZIP file {i}/{len(zip_paths)}: {os.path.basename(zip_path)}")
+                
+                # Check if already completed (for resume functionality)
+                if self.progress and self.progress.is_file_completed(zip_path):
+                    self.logger.info(f"Skipping already completed file: {os.path.basename(zip_path)}")
+                    continue
+                
+                # Check memory and system health before processing each ZIP file
+                if not self.should_process_more() or not self.check_system_resources():
+                    self.logger.warning(f"System resources constrained, stopping processing at ZIP file {i}")
+                    break
+                
+                try:
+                    # Process single ZIP file with streaming
+                    file_stats = self.process_zipfile_streaming(zip_path, database, max_files)
+                    
+                    # Aggregate statistics
+                    for key in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions', 'files_processed', 'files_failed']:
+                        total_stats[key] += file_stats[key]
+                    
+                    total_stats['zip_files_successful'] += 1
+                    
+                    # Mark file as completed in progress tracker
+                    if self.progress:
+                        self.progress.mark_file_completed(zip_path, file_stats)
+                    
+                    # Log progress
+                    total_records = sum(file_stats[key] for key in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions'])
+                    self.logger.info(f"ZIP file {i} complete: {total_records} records processed")
+                    
+                    self.monitor_memory(f"completed ZIP file {i}")
+                    
+                    # Force cleanup after each ZIP file
+                    gc.collect()
+                        
+                except Exception as e:
+                    total_stats['zip_files_failed'] += 1
+                    
+                    # Mark file as failed in progress tracker
+                    if self.progress:
+                        self.progress.mark_file_failed(zip_path, str(e))
+                    
+                    # Handle the error and decide whether to continue
+                    if not self.handle_processing_error(zip_path, e):
+                        self.logger.error("Critical error encountered, stopping processing")
+                        break
+                    
+                    # Continue with other files
+                    continue
+        
+        finally:
+            # Always restore database settings
+            self.logger.info("Restoring database performance settings")
+            database.recreate_all_indexes()
+            database.disable_performance_mode()
+        
+        # Final statistics
+        total_records = sum(total_stats[key] for key in ['organizations', 'contacts', 'contracts', 'contract_products', 'transactions'])
+        self.logger.info(
+            f"Streaming processing complete: {total_stats['zip_files_successful']} ZIP files successful, "
+            f"{total_stats['zip_files_failed']} failed. "
+            f"Total: {total_records} records, {total_stats['files_processed']} XML files processed."
+        )
+        
+        # Final memory cleanup
+        final_memory = self.get_memory_usage()
+        memory_delta = final_memory - self.initial_memory
+        self.logger.info(
+            f"Final memory usage: {format_bytes(final_memory)} "
+            f"[Δ{format_bytes(memory_delta, signed=True)} from start]"
+        )
+        
+        return total_stats
     
     def handle_processing_error(self, zip_path: str, error: Exception) -> bool:
         """Handle processing errors with recovery options.
