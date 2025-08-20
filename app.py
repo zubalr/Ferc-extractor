@@ -303,11 +303,13 @@ def libsql_table_row_count(adapter: dict, table_name: str) -> int:
             res = _http_execute(adapter["url"], adapter.get("auth_token"), sql)
         else:
             return 0
+        
         df = _normalize_libsql_result(res)
         # expected single value
-        if df.size > 0:
+        if df is not None and df.size > 0:
             return int(df.iat[0, 0])
-    except Exception:
+    except Exception as e:
+        print(f"Error counting rows in table {table_name}: {e}")
         pass
     return 0
 
@@ -335,10 +337,16 @@ def libsql_read_table(adapter: dict, table_name: str, limit: int = 1000) -> pd.D
             res = _http_execute(adapter["url"], adapter.get("auth_token"), sql)
         else:
             raise RuntimeError("Unknown libsql adapter type")
+        
         df = _normalize_libsql_result(res)
+        # Ensure we return a proper DataFrame, even if empty
+        if df is None:
+            return pd.DataFrame()
         return df
     except Exception as e:
-        raise
+        # Return empty DataFrame instead of raising to avoid UI breaking
+        print(f"Error reading table {table_name}: {e}")
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
@@ -534,9 +542,23 @@ def main():
         if not tables:
             st.info("No tables discovered. If your Turso DB contains tables, ensure the TURSO_AUTH_TOKEN is correct and redeploy.")
             return
-        table = st.selectbox("Select table", tables)
+        
+        # Set default table (avoid transactions, prefer first non-transactions table)
+        default_table = tables[0]  # fallback to first
+        for t in tables:
+            if t.lower() not in ['transactions', 'transaction']:
+                default_table = t
+                break
+        
+        # Find the index of the default table
+        try:
+            default_index = tables.index(default_table)
+        except ValueError:
+            default_index = 0
+            
+        table = st.selectbox("Select table", tables, index=default_index)
         show_sql = st.checkbox("Show SQL preview")
-        sample_percent = st.slider("Sample % (0 = none)", 0, 100, 0)
+        sample_percent = st.slider("Sample % (0 = none)", 0, 100, 10)  # Default to 10% sampling
         download_all = st.button("Download full table CSV")
 
         st.markdown("---")
@@ -556,12 +578,24 @@ def main():
             df = libsql_read_table(libsql_adapter, table, limit=preview_limit)
         else:
             df = read_table(engine, table, limit=preview_limit)
+        
+        # Debug: Show what we got
+        st.sidebar.write(f"DEBUG: Loaded {len(df)} rows, {len(df.columns) if not df.empty else 0} columns")
+        if df.empty:
+            st.sidebar.error("DEBUG: DataFrame is empty!")
+        else:
+            st.sidebar.write(f"DEBUG: Columns: {list(df.columns)}")
+            
     except Exception as e:
         st.error(f"Error reading table '{table}': {e}")
         return
 
-    if sample_percent > 0 and sample_percent < 100:
-        df = df.sample(frac=sample_percent / 100.0)
+    if sample_percent > 0 and sample_percent < 100 and not df.empty:
+        try:
+            df = df.sample(frac=sample_percent / 100.0)
+            st.sidebar.write(f"DEBUG: Applied {sample_percent}% sampling, now {len(df)} rows")
+        except Exception as e:
+            st.sidebar.warning(f"Could not apply sampling: {e}")
 
     with right:
         st.subheader(f"{table} — preview {len(df)} rows")
