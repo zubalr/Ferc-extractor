@@ -155,16 +155,39 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
         cols = [f"c{i}" for i in range(len(res[0]))]
         return pd.DataFrame(res, columns=cols)
 
-    # If it's an object with rows and columns attributes
-    rows = getattr(res, "rows", None)
-    cols = getattr(res, "columns", None) or getattr(res, "cols", None)
-    if rows is not None:
-        try:
-            if cols:
-                return pd.DataFrame(rows, columns=cols)
-            return pd.DataFrame(rows)
-        except Exception:
-            return pd.DataFrame(rows)
+    # If it's a dict-like response with 'rows' and 'columns' keys
+    if isinstance(res, dict):
+        # direct shape: {"columns": [...], "rows": [[...],[...]]}
+        rows = res.get("rows")
+        cols = res.get("columns") or res.get("cols")
+        if rows is not None:
+            try:
+                if cols:
+                    return pd.DataFrame(rows, columns=cols)
+                return pd.DataFrame(rows)
+            except Exception:
+                return pd.DataFrame(rows)
+
+        # nested results: {"results": [{"columns": [...], "rows": [...]}, ...]}
+        results = res.get("results") or res.get("result") or res.get("data")
+        if isinstance(results, list) and len(results) > 0:
+            first = results[0]
+            if isinstance(first, dict) and ("rows" in first or "columns" in first or "cols" in first):
+                rows = first.get("rows")
+                cols = first.get("columns") or first.get("cols")
+                if rows is not None:
+                    try:
+                        if cols:
+                            return pd.DataFrame(rows, columns=cols)
+                        return pd.DataFrame(rows)
+                    except Exception:
+                        return pd.DataFrame(rows)
+            # sometimes results is a list of dicts representing rows
+            if isinstance(first, dict) and all(isinstance(v, (str, int, float, type(None))) for v in first.values()):
+                try:
+                    return pd.DataFrame(results)
+                except Exception:
+                    pass
 
     # Last resort: wrap single scalar
     try:
@@ -355,7 +378,15 @@ def main():
         return
 
     if not tables:
-        st.warning("No tables found in the database.")
+        # If HTTP adapter, probe endpoint for debugging
+        if libsql_adapter is not None and libsql_adapter.get("type") == "http":
+            try:
+                probe = _http_execute(libsql_adapter.get("url"), libsql_adapter.get("auth_token"), "SELECT 1")
+                st.warning("No tables found in the database. Probe response:\n" + str(probe))
+            except Exception as e:
+                st.error(f"No tables found and probe failed: {e}")
+        else:
+            st.warning("No tables found in the database.")
         return
 
     # Determine adapter type for display
