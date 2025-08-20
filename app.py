@@ -235,13 +235,19 @@ def libsql_list_tables(adapter: dict) -> List[str]:
                 res = _http_execute(adapter["url"], adapter.get("auth_token"), sql)
             else:
                 continue
+            
+            # CRITICAL: Always normalize the result to extract table names
             df = _normalize_libsql_result(res)
-            # try to find a name column
-            if "name" in df.columns:
-                return [str(x) for x in df["name"].tolist()]
-            # else take first column
-            if df.shape[1] >= 1:
-                return [str(x) for x in df.iloc[:, 0].tolist()]
+            if df is not None and not df.empty:
+                # try to find a name column
+                if "name" in df.columns:
+                    names = [str(x) for x in df["name"].tolist()]
+                    # Filter out system tables and return only user tables
+                    return [name for name in names if not name.startswith('sqlite_')]
+                # else take first column
+                elif df.shape[1] >= 1:
+                    names = [str(x) for x in df.iloc[:, 0].tolist()]
+                    return [name for name in names if not name.startswith('sqlite_')]
         except Exception:
             continue
     return []
@@ -386,10 +392,13 @@ def main():
             st.error(f"Unable to connect to the database: {e}")
             return
 
-    # Get tables
+    # Get tables - with debug output
     try:
         if libsql_adapter is not None:
             tables = libsql_list_tables(libsql_adapter)
+            # Debug: Let's see what we actually got
+            st.sidebar.write(f"DEBUG: Raw tables result type: {type(tables)}")
+            st.sidebar.write(f"DEBUG: Raw tables content: {tables}")
         else:
             tables = list_tables(engine)
     except Exception as e:
@@ -397,24 +406,16 @@ def main():
         return
 
     # Normalize tables response from Turso/libsql into a clean list of table names
-    if isinstance(tables, dict):
-        # Turso returns: {'columns': ['name'], 'rows': [['contacts'], ['contracts'], ...]}
-        try:
-            df_tmp = _normalize_libsql_result(tables)
-            if "name" in df_tmp.columns:
-                tables = [str(x) for x in df_tmp["name"].tolist()]
-            elif df_tmp.shape[1] >= 1:
-                tables = [str(x) for x in df_tmp.iloc[:, 0].tolist()]
-            else:
-                tables = []
-        except Exception:
-            tables = []
-    elif not isinstance(tables, list) or not all(isinstance(x, str) for x in tables):
-        # Convert anything else to list of strings
-        try:
-            tables = [str(x) for x in tables] if tables else []
-        except Exception:
-            tables = []
+    # Remove this entire normalization block since libsql_list_tables should return proper list now
+    st.sidebar.write(f"DEBUG: Tables after normalization attempt: {tables}")
+    
+    # Ensure we have a list of strings
+    if not isinstance(tables, list):
+        st.error(f"Expected list of tables, got: {type(tables)} - {tables}")
+        return
+        
+    # Filter to only string table names
+    tables = [str(t) for t in tables if isinstance(t, str) or (isinstance(t, (list, tuple)) and len(t) == 1)]
 
     if not tables:
         # If HTTP adapter, probe endpoint for debugging
