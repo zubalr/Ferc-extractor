@@ -5,6 +5,8 @@ import pandas as pd
 import streamlit as st
 import sqlalchemy
 from sqlalchemy import text
+import importlib
+from typing import Any
 import plotly.express as px
 
 
@@ -73,6 +75,189 @@ def get_engine(db_url_or_path: Optional[str] = None, allow_local: bool = False):
         raise
 
 
+@st.cache_resource
+def get_libsql_client(url: str, auth_token: Optional[str] = None) -> Any:
+    """Try to create a libsql client/connection object. Return an adapter dict with type and client.
+    This function uses importlib to avoid hard dependency until runtime.
+    """
+    try:
+        libsql = importlib.import_module("libsql")
+    except Exception:
+        # Fall back to HTTP adapter if libsql package not installed
+        return {"type": "http", "url": url, "auth_token": auth_token}
+
+    # Prefer a Client class if present
+    if hasattr(libsql, "Client"):
+        Client = getattr(libsql, "Client")
+        try:
+            # many libsql client constructors accept url and headers
+            headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else None
+            client = Client(url, headers=headers) if headers is not None else Client(url)
+            return {"type": "client", "client": client}
+        except Exception:
+            # fallback to trying connect
+            pass
+
+    # Next try a connect() style API (returns a connection object)
+    if hasattr(libsql, "connect"):
+        try:
+            kwargs = {"headers": {"Authorization": f"Bearer {auth_token}"}} if auth_token else {}
+            conn = libsql.connect(url, **kwargs)
+            return {"type": "connection", "client": conn}
+        except Exception:
+            # fallback to http adapter
+            return {"type": "http", "url": url, "auth_token": auth_token}
+
+    # If we reach here, return HTTP adapter as a last resort
+    return {"type": "http", "url": url, "auth_token": auth_token}
+
+
+def _http_execute(url: str, auth_token: Optional[str], sql: str, timeout: int = 30):
+    """Execute SQL against a libsql HTTP endpoint. Converts libsql://host to https://host/sql."""
+    import requests
+    # derive host
+    # url may be libsql://<host> or libsql://<host>/<path>
+    if url.startswith("libsql://"):
+        host = url[len("libsql://"):]
+    else:
+        host = url
+    # ensure no trailing slash prefix
+    endpoint = f"https://{host.rstrip('/')}/sql"
+    headers = {"Content-Type": "application/json"}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    payload = {"sql": sql}
+    resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    try:
+        return resp.json()
+    except Exception:
+        # fallback to text
+        return resp.text
+
+
+
+def _normalize_libsql_result(res: Any) -> pd.DataFrame:
+    """Normalize possible libsql client results into a pandas DataFrame.
+    This attempts several common return shapes.
+    """
+    # If it's already a DataFrame
+    if isinstance(res, pd.DataFrame):
+        return res
+
+    # If it's a list of dicts
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        return pd.DataFrame(res)
+
+    # If it's a list of tuples with no column info, create generic columns
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], (list, tuple)):
+        # create column names c0..cN
+        cols = [f"c{i}" for i in range(len(res[0]))]
+        return pd.DataFrame(res, columns=cols)
+
+    # If it's an object with rows and columns attributes
+    rows = getattr(res, "rows", None)
+    cols = getattr(res, "columns", None) or getattr(res, "cols", None)
+    if rows is not None:
+        try:
+            if cols:
+                return pd.DataFrame(rows, columns=cols)
+            return pd.DataFrame(rows)
+        except Exception:
+            return pd.DataFrame(rows)
+
+    # Last resort: wrap single scalar
+    try:
+        return pd.DataFrame([res])
+    except Exception:
+        raise RuntimeError("Unable to normalize libsql result into DataFrame")
+
+
+def libsql_list_tables(adapter: dict) -> List[str]:
+    client = adapter["client"]
+    sqls = [
+        "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name;",
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;",
+    ]
+    for sql in sqls:
+        try:
+            if adapter.get("type") == "client":
+                res = client.execute(sql)
+            elif adapter.get("type") == "connection":
+                cur = client.cursor()
+                cur.execute(sql)
+                rows = cur.fetchall()
+                res = rows
+            elif adapter.get("type") == "http":
+                # use http endpoint
+                res = _http_execute(adapter["url"], adapter.get("auth_token"), sql)
+            else:
+                continue
+            df = _normalize_libsql_result(res)
+            # try to find a name column
+            if "name" in df.columns:
+                return [str(x) for x in df["name"].tolist()]
+            # else take first column
+            if df.shape[1] >= 1:
+                return [str(x) for x in df.iloc[:, 0].tolist()]
+        except Exception:
+            continue
+    return []
+
+
+def libsql_table_row_count(adapter: dict, table_name: str) -> int:
+    client = adapter["client"]
+    sql = f'SELECT COUNT(*) as cnt FROM "{table_name}"'
+    try:
+        if adapter.get("type") == "client":
+            res = client.execute(sql)
+        elif adapter.get("type") == "connection":
+            cur = client.cursor()
+            cur.execute(sql)
+            rows = cur.fetchall()
+            res = rows
+        elif adapter.get("type") == "http":
+            res = _http_execute(adapter["url"], adapter.get("auth_token"), sql)
+        else:
+            return 0
+        df = _normalize_libsql_result(res)
+        # expected single value
+        if df.size > 0:
+            return int(df.iat[0, 0])
+    except Exception:
+        pass
+    return 0
+
+
+def libsql_read_table(adapter: dict, table_name: str, limit: int = 1000) -> pd.DataFrame:
+    client = adapter["client"]
+    sql = f'SELECT * FROM "{table_name}" LIMIT {int(limit)}'
+    try:
+        if adapter.get("type") == "client":
+            res = client.execute(sql)
+        elif adapter.get("type") == "connection":
+            cur = client.cursor()
+            cur.execute(sql)
+            rows = cur.fetchall()
+            # try to get column names
+            cols = None
+            try:
+                cols = [d[0] for d in cur.description]
+            except Exception:
+                pass
+            if cols is not None:
+                return pd.DataFrame(rows, columns=cols)
+            res = rows
+        elif adapter.get("type") == "http":
+            res = _http_execute(adapter["url"], adapter.get("auth_token"), sql)
+        else:
+            raise RuntimeError("Unknown libsql adapter type")
+        df = _normalize_libsql_result(res)
+        return df
+    except Exception as e:
+        raise
+
+
 @st.cache_data(ttl=300)
 def list_tables(engine) -> List[str]:
     """Return list of table names from the database connected via engine."""
@@ -135,16 +320,32 @@ def main():
         st.error("No `DATABASE_URL` provided. Please set `DATABASE_URL` in Streamlit Cloud or enter a connection string in the sidebar.\n\nDo NOT rely on the repository sqlite for deployment — enable 'Allow using local repo sqlite' only for local testing.")
         return
 
-    # Create engine
+    # Create engine (or libsql client fallback)
+    engine = None
+    libsql_adapter = None
     try:
         engine = get_engine(db_input if db_input else DEFAULT_DB_PATH, allow_local=allow_local)
     except Exception as e:
-        st.error(f"Unable to connect to the database: {e}")
-        return
+        # If URL looks like libsql and engine creation failed, try the libsql client directly
+        msg = str(e)
+        if db_input and db_input.startswith("libsql://"):
+            st.warning("SQLAlchemy libsql dialect not available or engine failed; attempting libsql client fallback...")
+            auth_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_AUTH_TOKE")
+            try:
+                libsql_adapter = get_libsql_client(db_input, auth_token=auth_token)
+            except Exception as e2:
+                st.error(f"Unable to connect with libsql client fallback: {e2}\nOriginal error: {msg}")
+                return
+        else:
+            st.error(f"Unable to connect to the database: {e}")
+            return
 
     # Get tables
     try:
-        tables = list_tables(engine)
+        if libsql_adapter is not None:
+            tables = libsql_list_tables(libsql_adapter)
+        else:
+            tables = list_tables(engine)
     except Exception as e:
         st.error(f"Error reading database schema: {e}")
         return
@@ -163,7 +364,10 @@ def main():
         total_preview_rows = 0
         for t in sample_tables:
             try:
-                total_preview_rows += table_row_count(engine, t)
+                if libsql_adapter is not None:
+                    total_preview_rows += libsql_table_row_count(libsql_adapter, t)
+                else:
+                    total_preview_rows += table_row_count(engine, t)
             except Exception:
                 pass
         col3.metric("Rows (sample)", f"{total_preview_rows}")
@@ -185,7 +389,10 @@ def main():
 
     # Load table data
     try:
-        df = read_table(engine, table, limit=preview_limit)
+        if libsql_adapter is not None:
+            df = libsql_read_table(libsql_adapter, table, limit=preview_limit)
+        else:
+            df = read_table(engine, table, limit=preview_limit)
     except Exception as e:
         st.error(f"Error reading table '{table}': {e}")
         return
@@ -224,7 +431,10 @@ def main():
         # Handle full download (streaming large tables isn't ideal but provide link)
         if download_all:
             try:
-                full_df = pd.read_sql_table(table, con=engine)
+                if libsql_adapter is not None:
+                    full_df = libsql_read_table(libsql_adapter, table, limit=10**9)
+                else:
+                    full_df = pd.read_sql_table(table, con=engine)
                 st.download_button("📥 Download full CSV", full_df.to_csv(index=False).encode("utf-8"), file_name=f"{table}.csv")
             except Exception as e:
                 st.error(f"Failed to load full table for download: {e}")
@@ -321,7 +531,10 @@ def main():
         if st.button("Compute full-table stats"):
             try:
                 with st.spinner("Computing full-table stats..."):
-                    full = pd.read_sql_table(table, con=engine)
+                    if libsql_adapter is not None:
+                        full = libsql_read_table(libsql_adapter, table, limit=10**9)
+                    else:
+                        full = pd.read_sql_table(table, con=engine)
                     st.success(f"Loaded full table: {len(full)} rows")
                     st.markdown("**Full-table missingness (top 25)**")
                     fm = full.isna().mean().sort_values(ascending=False).head(25)

@@ -5,3 +5,4 @@ sqlalchemy>=2.0
 plotly>=5.0
 libsql
 sqlalchemy-libsql
+requests
