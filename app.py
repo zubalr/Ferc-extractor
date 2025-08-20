@@ -457,18 +457,41 @@ def main():
     left, right = st.columns([1, 3])
 
     # Prepare tables for selection: ensure it's a list of strings
-    if isinstance(tables, dict):
-        # Sometimes our HTTP adapter returned a full response dict; try to normalize
+    def _extract_names_from_response(res) -> List[str]:
+        """Given a libsql-like response (dict or DataFrame), try to extract a list of table names."""
         try:
-            df_tmp = _normalize_libsql_result(tables)
-            if "name" in df_tmp.columns:
-                tables = [str(x) for x in df_tmp["name"].tolist()]
-            elif df_tmp.shape[1] >= 1:
-                tables = [str(x) for x in df_tmp.iloc[:, 0].tolist()]
+            if isinstance(res, dict):
+                df_tmp = _normalize_libsql_result(res)
+            elif isinstance(res, pd.DataFrame):
+                df_tmp = res
             else:
-                tables = []
+                # unknown shape
+                return []
+
+            if "name" in df_tmp.columns:
+                return [str(x) for x in df_tmp["name"].tolist()]
+            if df_tmp.shape[1] >= 1:
+                return [str(x) for x in df_tmp.iloc[:, 0].tolist()]
+            return []
         except Exception:
-            tables = []
+            return []
+
+    # If we got a dict response, or a list containing a dict, normalize to list[str]
+    if isinstance(tables, dict):
+        tables = _extract_names_from_response(tables)
+    elif isinstance(tables, list) and tables and isinstance(tables[0], dict):
+        # Sometimes the HTTP adapter returns a list with a single dict response
+        names = []
+        for item in tables:
+            names.extend(_extract_names_from_response(item))
+        # dedupe while preserving order
+        seen = set()
+        deduped = []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                deduped.append(n)
+        tables = deduped
 
     with left:
         st.header("Explore Tables")
@@ -601,9 +624,12 @@ def main():
             st.markdown("### Missingness")
             miss = df.isna().mean().sort_values(ascending=False)
             if not miss.empty:
-                fig_miss = px.bar(miss.reset_index().rename(columns={"index": "column", 0: "missing_frac"}), x="column", y=0, labels={0: "missing_frac"}, title="Missing fraction by column")
+                miss_df = miss.reset_index()
+                miss_df.columns = ["column", "missing_frac"]
+                fig_miss = px.bar(miss_df, x="column", y="missing_frac", title="Missing fraction by column")
                 # Plotly expects a named column
-                fig_miss.data[0].name = "missing"
+                if fig_miss.data:
+                    fig_miss.data[0].name = "missing"
                 st.plotly_chart(fig_miss, use_container_width=True)
             else:
                 st.info("No missingness detected or empty preview.")
