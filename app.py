@@ -34,7 +34,7 @@ def get_engine(db_url_or_path: Optional[str] = None, allow_local: bool = False):
     # If using Turso/libsql URL (libsql://...), libsql-python expects the auth token provided via connect_args
     connect_args = {}
     # Accept either TURSO_AUTH_TOKEN or TURSO_AUTH_TOKE (typo in .env) as user might have
-    auth_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_AUTH_TOKE")
+    auth_token = os.environ.get("TURSO_AUTH_TOKEN")
     if url and url.startswith("libsql://"):
         if auth_token:
             # libsql driver can accept a header param via connect_args; SQLAlchemy dialects vary.
@@ -174,7 +174,7 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
 
 
 def libsql_list_tables(adapter: dict) -> List[str]:
-    client = adapter["client"]
+    client = adapter.get("client")
     sqls = [
         "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name;",
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;",
@@ -206,7 +206,7 @@ def libsql_list_tables(adapter: dict) -> List[str]:
 
 
 def libsql_table_row_count(adapter: dict, table_name: str) -> int:
-    client = adapter["client"]
+    client = adapter.get("client")
     sql = f'SELECT COUNT(*) as cnt FROM "{table_name}"'
     try:
         if adapter.get("type") == "client":
@@ -230,7 +230,7 @@ def libsql_table_row_count(adapter: dict, table_name: str) -> int:
 
 
 def libsql_read_table(adapter: dict, table_name: str, limit: int = 1000) -> pd.DataFrame:
-    client = adapter["client"]
+    client = adapter.get("client")
     sql = f'SELECT * FROM "{table_name}" LIMIT {int(limit)}'
     try:
         if adapter.get("type") == "client":
@@ -320,23 +320,27 @@ def main():
         st.error("No `DATABASE_URL` provided. Please set `DATABASE_URL` in Streamlit Cloud or enter a connection string in the sidebar.\n\nDo NOT rely on the repository sqlite for deployment — enable 'Allow using local repo sqlite' only for local testing.")
         return
 
-    # Create engine (or libsql client fallback)
+    # Create engine or libsql adapter
     engine = None
     libsql_adapter = None
-    try:
-        engine = get_engine(db_input if db_input else DEFAULT_DB_PATH, allow_local=allow_local)
-    except Exception as e:
-        # If URL looks like libsql and engine creation failed, try the libsql client directly
-        msg = str(e)
-        if db_input and db_input.startswith("libsql://"):
-            st.warning("SQLAlchemy libsql dialect not available or engine failed; attempting libsql client fallback...")
-            auth_token = os.environ.get("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_AUTH_TOKE")
-            try:
-                libsql_adapter = get_libsql_client(db_input, auth_token=auth_token)
-            except Exception as e2:
-                st.error(f"Unable to connect with libsql client fallback: {e2}\nOriginal error: {msg}")
+
+    # If the URL is a libsql (Turso) URL, prefer using libsql client / HTTP adapter directly
+    if db_input and db_input.startswith("libsql://"):
+        auth_token = os.environ.get("TURSO_AUTH_TOKEN")
+        try:
+            # Try to get a libsql client; this may return a client adapter or an http adapter
+            libsql_adapter = get_libsql_client(db_input, auth_token=auth_token)
+            if not isinstance(libsql_adapter, dict) or "type" not in libsql_adapter:
+                st.error(f"Libsql adapter returned unexpected value: {libsql_adapter!r}")
                 return
-        else:
+        except Exception as e:
+            st.error(f"Unable to initialize libsql adapter: {e}")
+            return
+    else:
+        # Non-libsql DBs use SQLAlchemy engine
+        try:
+            engine = get_engine(db_input if db_input else DEFAULT_DB_PATH, allow_local=allow_local)
+        except Exception as e:
             st.error(f"Unable to connect to the database: {e}")
             return
 
@@ -354,10 +358,14 @@ def main():
         st.warning("No tables found in the database.")
         return
 
+    # Determine adapter type for display
+    adapter_type = "sqlalchemy" if engine is not None else (libsql_adapter.get("type") if isinstance(libsql_adapter, dict) else "unknown")
+
     # Top row: quick stats
     with st.container():
         col1, col2, col3 = st.columns([2, 3, 2])
         col1.metric("Connected DB", os.path.basename(db_input) if db_input else "(default)")
+        col1.write(f"Adapter: {adapter_type}")
         col2.metric("Tables", len(tables))
         # estimate total rows across first 5 tables (fast)
         sample_tables = tables[:5]
