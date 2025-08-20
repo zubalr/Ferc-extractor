@@ -24,7 +24,7 @@ st.set_page_config(
     page_title="FERC EQR Analytics Dashboard",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"
 )
 
 # Custom CSS
@@ -284,7 +284,7 @@ def create_dashboard_header():
     """, unsafe_allow_html=True)
     
     # Add a quick start guide
-    with st.expander("🚀 **Quick Start Guide** - Click here if you're new!", expanded=False):
+    with st.expander("🚀 **Quick Start Guide** - Click here if you're new!", expanded=True):
         st.markdown("""
         ### Welcome to FERC EQR Analytics! Here's how to explore your data:
         
