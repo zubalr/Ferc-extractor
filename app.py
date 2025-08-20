@@ -148,13 +148,30 @@ def _http_execute(url: str, auth_token: Optional[str], sql: str, timeout: int = 
                 # Debug: Let's see the raw response structure
                 print(f"DEBUG: Raw Turso response: {json_resp}")
                 
-                # For Turso API, extract the first result from the response
-                if isinstance(json_resp, dict) and "results" in json_resp:
+                # Handle Turso response format which can be:
+                # 1. [{"results": {"columns": [...], "rows": [...]}}] - array wrapper
+                # 2. {"results": [{"columns": [...], "rows": [...]}]} - object wrapper  
+                
+                # Case 1: Array wrapper - extract first element
+                if isinstance(json_resp, list) and len(json_resp) > 0:
+                    first_item = json_resp[0]
+                    print(f"DEBUG: First array item: {first_item}")
+                    if isinstance(first_item, dict) and "results" in first_item:
+                        # Extract the results content directly
+                        results_content = first_item["results"]
+                        print(f"DEBUG: Extracted results content: {results_content}")
+                        return results_content
+                    return first_item
+                
+                # Case 2: Object wrapper with results array  
+                elif isinstance(json_resp, dict) and "results" in json_resp:
                     results = json_resp["results"]
                     if isinstance(results, list) and len(results) > 0:
                         first_result = results[0]
-                        print(f"DEBUG: First result: {first_result}")
-                        return first_result  # Return first result, not the wrapper
+                        print(f"DEBUG: First result from array: {first_result}")
+                        return first_result
+                    return results
+                
                 return json_resp
             except Exception:
                 return resp.text
@@ -171,9 +188,6 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
     """Normalize possible libsql client results into a pandas DataFrame.
     This attempts several common return shapes.
     """
-    print(f"DEBUG: Normalizing result type: {type(res)}")
-    print(f"DEBUG: Normalizing result content: {res}")
-    
     # If it's already a DataFrame
     if isinstance(res, pd.DataFrame):
         return res
@@ -205,23 +219,16 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
 
     # If it's a dict-like response with 'rows' and 'columns' keys (Turso format)
     if isinstance(res, dict):
-        print(f"DEBUG: Processing dict with keys: {list(res.keys())}")
-        
         # Handle the specific Turso response format first
         # {"columns": ["name"], "rows": [["contacts"], ["contracts"], ...]}
         rows = res.get("rows")
         cols = res.get("columns") or res.get("cols")
         
-        print(f"DEBUG: Found rows: {rows}")
-        print(f"DEBUG: Found columns: {cols}")
-        
         if rows is not None and cols is not None:
             try:
                 df = pd.DataFrame(rows, columns=cols)
-                print(f"DEBUG: Successfully created DataFrame with shape: {df.shape}")
                 return df
             except Exception as e:
-                print(f"DEBUG: Failed to create DataFrame with columns: {e}")
                 # Fallback if column count doesn't match
                 try:
                     return pd.DataFrame(rows)
@@ -595,13 +602,6 @@ def main():
             df = libsql_read_table(libsql_adapter, table, limit=preview_limit)
         else:
             df = read_table(engine, table, limit=preview_limit)
-        
-        # Debug: Show what we got
-        st.sidebar.write(f"DEBUG: Loaded {len(df)} rows, {len(df.columns) if not df.empty else 0} columns")
-        if df.empty:
-            st.sidebar.error("DEBUG: DataFrame is empty!")
-        else:
-            st.sidebar.write(f"DEBUG: Columns: {list(df.columns)}")
             
     except Exception as e:
         st.error(f"Error reading table '{table}': {e}")
@@ -610,7 +610,6 @@ def main():
     if sample_percent > 0 and sample_percent < 100 and not df.empty:
         try:
             df = df.sample(frac=sample_percent / 100.0)
-            st.sidebar.write(f"DEBUG: Applied {sample_percent}% sampling, now {len(df)} rows")
         except Exception as e:
             st.sidebar.warning(f"Could not apply sampling: {e}")
 
