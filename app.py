@@ -582,7 +582,7 @@ def main():
             
         table = st.selectbox("Select table", tables, index=default_index)
         show_sql = st.checkbox("Show SQL preview")
-        sample_percent = st.slider("Sample % (0 = none)", 0, 100, 10)  # Default to 10% sampling
+        sample_percent = st.slider("Sample % (0 = none)", 0, 100, 0)  # Default to 0% sampling
         download_all = st.button("Download full table CSV")
 
         st.markdown("---")
