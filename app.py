@@ -456,9 +456,23 @@ def main():
     # Main layout: left side controls, right side content
     left, right = st.columns([1, 3])
 
+    # Prepare tables for selection: ensure it's a list of strings
+    if isinstance(tables, dict):
+        # Sometimes our HTTP adapter returned a full response dict; try to normalize
+        try:
+            df_tmp = _normalize_libsql_result(tables)
+            if "name" in df_tmp.columns:
+                tables = [str(x) for x in df_tmp["name"].tolist()]
+            elif df_tmp.shape[1] >= 1:
+                tables = [str(x) for x in df_tmp.iloc[:, 0].tolist()]
+            else:
+                tables = []
+        except Exception:
+            tables = []
+
     with left:
         st.header("Explore Tables")
-        table = st.selectbox("Select table", tables)
+        table = st.selectbox("Select table", tables if tables else [])
         show_sql = st.checkbox("Show SQL preview")
         sample_percent = st.slider("Sample % (0 = none)", 0, 100, 0)
         download_all = st.button("Download full table CSV")
@@ -542,7 +556,17 @@ def main():
                 cat = st.selectbox("Categorical column (top values)", cat_cols, key="bar_cat")
                 topn = st.slider("Top N categories", min_value=3, max_value=50, value=10, key="topn")
                 vc = df[cat].fillna("(null)").value_counts().nlargest(topn)
-                fig2 = px.bar(vc.reset_index().rename(columns={"index": cat, cat: "count"}), x=cat, y="count", title=f"Top {topn}: {cat}")
+                # Use a safe conversion to DataFrame to avoid duplicate column names
+                # Rename the series axis to the category name, then reset_index with a count column
+                try:
+                    vc_df = vc.rename_axis(cat).reset_index(name="count")
+                except Exception:
+                    # Fallback: generic column names
+                    vc_df = vc.reset_index()
+                    vc_df.columns = ["category", "count"]
+                    cat = "category"
+
+                fig2 = px.bar(vc_df, x=cat, y="count", title=f"Top {topn}: {cat}")
                 st.plotly_chart(fig2, use_container_width=True)
             else:
                 st.info("No categorical columns for bar chart")
