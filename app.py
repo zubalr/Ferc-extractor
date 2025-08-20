@@ -122,31 +122,35 @@ def _http_execute(url: str, auth_token: Optional[str], sql: str, timeout: int = 
     else:
         host = url
     # ensure no trailing slash prefix
-    # We'll attempt both https://host/sql and https://host (some Turso setups serve SQL at /sql, others accept at root)
+    # Turso/libsql HTTP endpoint expects a JSON body with a `statements` field.
+    # Use the base host (no /sql) and send payload: {"statements": [{"sql": "..."}]}
     base = f"https://{host.rstrip('/')}"
-    endpoints = [f"{base}/sql", base]
 
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
-    payload = {"sql": sql}
+
+    # Preferred Turso payload shape
+    payloads = [
+        {"statements": [{"sql": sql}]},
+        # fallback: older shapes or simpler API
+        {"statements": [sql]},
+        {"sql": sql},
+    ]
 
     last_exc = None
-    for endpoint in endpoints:
+    for payload in payloads:
         try:
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
-            # For regular usage, raise for status to bubble errors
+            resp = requests.post(base, json=payload, headers=headers, timeout=timeout)
             resp.raise_for_status()
             try:
                 return resp.json()
             except Exception:
                 return resp.text
         except Exception as e:
-            # keep last exception and try next endpoint
             last_exc = e
             continue
 
-    # If we reach here, both attempts failed — raise the last exception for caller to handle
     if last_exc is not None:
         raise last_exc
 
@@ -400,24 +404,25 @@ def main():
             auth = libsql_adapter.get("auth_token")
             base = host[len("libsql://"):] if host.startswith("libsql://") else host
             base = base.rstrip('/')
-            endpoints = [f"https://{base}/sql", f"https://{base}"]
+            ep = f"https://{base}"
             probe_results = []
-            for ep in endpoints:
+            try:
+                import requests
+                headers = {"Content-Type": "application/json", "Accept": "application/json"}
+                if auth:
+                    headers["Authorization"] = f"Bearer {auth}"
+                # Use Turso expected payload shape
+                payload = {"statements": [{"sql": "SELECT 1"}]}
+                resp = requests.post(ep, json=payload, headers=headers, timeout=15)
                 try:
-                    import requests
-                    headers = {"Content-Type": "application/json"}
-                    if auth:
-                        headers["Authorization"] = f"Bearer {auth}"
-                    resp = requests.post(ep, json={"sql": "SELECT 1"}, headers=headers, timeout=15)
-                    try:
-                        body = resp.json()
-                    except Exception:
-                        body = resp.text
-                    probe_results.append({"endpoint": ep, "status_code": resp.status_code, "body": body, "headers": dict(resp.headers)})
-                except Exception as e:
-                    probe_results.append({"endpoint": ep, "error": str(e)})
+                    body = resp.json()
+                except Exception:
+                    body = resp.text
+                probe_results.append({"endpoint": ep, "status_code": resp.status_code, "body": body, "headers": dict(resp.headers)})
+            except Exception as e:
+                probe_results.append({"endpoint": ep, "error": str(e)})
 
-            st.warning("No tables found in the database. Probe results below for debugging.")
+            st.warning("No tables found in the database. Probe results below for debugging (attempting base host with Turso 'statements' payload).")
             for pr in probe_results:
                 st.write(pr)
         else:
