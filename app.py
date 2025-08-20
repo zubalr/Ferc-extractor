@@ -164,6 +164,21 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
     if isinstance(res, pd.DataFrame):
         return res
 
+    # Try to parse string representations of dicts (common with HTTP responses)
+    if isinstance(res, str):
+        try:
+            import ast
+            # Try to safely evaluate string representation of dict/list
+            res = ast.literal_eval(res)
+        except (ValueError, SyntaxError):
+            # If that fails, try JSON parsing
+            try:
+                import json
+                res = json.loads(res)
+            except json.JSONDecodeError:
+                # If both fail, treat as single value
+                return pd.DataFrame([res], columns=['value'])
+
     # If it's a list of dicts
     if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
         return pd.DataFrame(res)
@@ -392,23 +407,16 @@ def main():
             st.error(f"Unable to connect to the database: {e}")
             return
 
-    # Get tables - with debug output
+    # Get tables
     try:
         if libsql_adapter is not None:
             tables = libsql_list_tables(libsql_adapter)
-            # Debug: Let's see what we actually got
-            st.sidebar.write(f"DEBUG: Raw tables result type: {type(tables)}")
-            st.sidebar.write(f"DEBUG: Raw tables content: {tables}")
         else:
             tables = list_tables(engine)
     except Exception as e:
         st.error(f"Error reading database schema: {e}")
         return
 
-    # Normalize tables response from Turso/libsql into a clean list of table names
-    # Remove this entire normalization block since libsql_list_tables should return proper list now
-    st.sidebar.write(f"DEBUG: Tables after normalization attempt: {tables}")
-    
     # Ensure we have a list of strings
     if not isinstance(tables, list):
         st.error(f"Expected list of tables, got: {type(tables)} - {tables}")
