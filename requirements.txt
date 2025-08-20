@@ -6,3 +6,4 @@ plotly>=5.0
 libsql
 sqlalchemy-libsql
 requests
+python-dotenv
