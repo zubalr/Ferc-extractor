@@ -3,3 +3,5 @@ pandas>=1.5
 altair>=4.2
 sqlalchemy>=2.0
 plotly>=5.0
+libsql
+sqlalchemy-libsql

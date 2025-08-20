@@ -51,7 +51,25 @@ def get_engine(db_url_or_path: Optional[str] = None, allow_local: bool = False):
     except Exception as e:
         # Provide extra guidance for libsql URLs
         if url and url.startswith("libsql://"):
-            raise RuntimeError(f"Failed to connect to libsql/Turso. Ensure TURSO_AUTH_TOKEN env var is set and the URL is correct. Original error: {e}")
+            msg = str(e)
+            if url and url.startswith("libsql://"):
+                extra = (
+                    "Failed to connect to libsql/Turso. Common causes:\n"
+                    "  - missing libsql SQLAlchemy dialect/plugin on the environment\n"
+                    "  - missing TURSO_AUTH_TOKEN in environment or Streamlit secrets\n\n"
+                    "How to fix:\n"
+                    "  1) Add the libsql SQLAlchemy dialect and client to your requirements, e.g. in requirements.txt add:\n"
+                    "       libsql\n"
+                    "       sqlalchemy-libsql\n"
+                    "     (Then redeploy on Streamlit Cloud so the dialect is available.)\n"
+                    "  2) Ensure you have set TURSO_AUTH_TOKEN (Streamlit secrets or env) with your Turso auth token.\n"
+                    "  3) Alternatively, use a different SQLAlchemy-compatible URL if available (postgresql://, mysql://, etc.).\n\n"
+                    "If you want me to switch to using the libsql Python client directly (avoid SQLAlchemy dialects), I can implement that fallback — say the word and I'll add it.\n"
+                )
+                # If the root cause looks like missing plugin, make it explicit
+                if "Can't load plugin: sqlalchemy.dialects:libsql" in msg or "NoSuchModuleError" in msg:
+                    raise RuntimeError(extra + f"\nOriginal error: {msg}")
+                raise RuntimeError(f"Failed to connect to libsql/Turso. Ensure TURSO_AUTH_TOKEN env var is set and the URL is correct. Original error: {msg}")
         raise
 
 
@@ -92,15 +110,18 @@ def infer_date_columns(df: pd.DataFrame) -> List[str]:
 
 def sidebar_connection_controls():
     st.sidebar.header("Connection")
-    st.sidebar.caption("Provide a DATABASE_URL in Streamlit Cloud (recommended). Local sqlite is disabled by default.")
-    # Prefer Turso env vars if present
+    st.sidebar.caption("This app connects to Turso via TURSO_DATABASE_URL and TURSO_AUTH_TOKEN set in Streamlit secrets.")
+    # Only allow Turso URL (from env) — user asked to remove generic DATABASE_URL
     env_turso = os.environ.get("TURSO_DATABASE_URL")
-    env_db = os.environ.get("DATABASE_URL")
-    default_val = env_turso or env_db or ""
-    db_url = st.sidebar.text_input("Database URL (leave blank to use env)", value=default_val)
+    if env_turso:
+        st.sidebar.write("Turso URL:")
+        st.sidebar.code(env_turso)
+    else:
+        st.sidebar.error("TURSO_DATABASE_URL not set in environment/secrets. Please add it in Streamlit Cloud secrets.")
+
     allow_local = st.sidebar.checkbox("Allow using local repo sqlite (not recommended)")
     limit = st.sidebar.number_input("Row limit (table preview)", value=2000, min_value=100, max_value=200000, step=100)
-    return db_url or default_val, limit, allow_local
+    return env_turso or "", limit, allow_local
 
 
 def main():
