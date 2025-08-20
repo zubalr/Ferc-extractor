@@ -22,7 +22,7 @@ DEFAULT_DB_PATH = "ferc-eqr-scraper/ferc_data.db"
 # Page configuration
 st.set_page_config(
     page_title="FERC EQR Analytics Dashboard",
-    page_icon="⚡",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="auto"
 )
@@ -31,20 +31,22 @@ st.set_page_config(
 st.markdown("""
     <style>
     .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        /* Subtle slate gradient to keep the UI professional and understated */
+        background: linear-gradient(90deg, #3b4252 0%, #6b7280 100%);
         padding: 1rem 2rem;
         border-radius: 10px;
         color: white;
         margin-bottom: 2rem;
         text-align: center;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.06);
     }
     .metric-card {
         background: white;
         padding: 1rem;
         border-radius: 8px;
-        border-left: 4px solid #667eea;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        /* Muted slate accent instead of bright purple */
+        border-left: 4px solid #4b5563;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.06);
         margin: 0.5rem 0;
     }
     </style>
@@ -276,7 +278,7 @@ def create_dashboard_header():
     """Create an interactive dashboard header with user guidance."""
     st.markdown("""
         <div class="main-header">
-            <h1 style="margin: 0; font-size: 2.5rem;">⚡ FERC EQR Analytics Dashboard</h1>
+            <h1 style="margin: 0; font-size: 2.5rem;">FERC EQR Analytics Dashboard</h1>
             <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 1.2rem;">
                 Interactive Data Exploration & Insights Platform
             </p>
@@ -284,26 +286,26 @@ def create_dashboard_header():
     """, unsafe_allow_html=True)
     
     # Add a quick start guide
-    with st.expander("🚀 **Quick Start Guide** - Click here if you're new!", expanded=True):
+    with st.expander("Quick Start Guide", expanded=True):
         st.markdown("""
         ### Welcome to FERC EQR Analytics! Here's how to explore your data:
         
-        1. **📊 Select a Table** - Choose from available tables in the left sidebar
-        2. **📋 View Data** - See your data in the "Data Preview" tab (opens by default)
-        3. **📈 Create Charts** - Click the "Visualizations" tab for interactive charts
-        4. **🔍 Get Insights** - Use "Advanced Analytics" tab for statistical analysis
-        5. **⚙️ Customize** - Adjust settings in the left sidebar (sample size, export options)
-        6. **📥 Export** - Download your data as CSV or JSON
-        
-        **💡 Tip**: Hover over any element for helpful tooltips!
+    1. **Select a Table** - Choose from available tables in the left sidebar
+    2. **View Data** - See your data in the "Data Preview" tab (opens by default)
+    3. **Create Charts** - Click the "Visualizations" tab for interactive charts
+    4. **Get Insights** - Use "Advanced Analytics" tab for statistical analysis
+    5. **Customize** - Adjust settings in the left sidebar (sample size, export options)
+    6. **Export** - Download your data as CSV or JSON
+
+    **Tip**: Hover over any element for helpful tooltips.
         """)
     
     # Quick stats banner
     st.markdown("""
-    <div style="background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); 
+    <div style="background: linear-gradient(90deg, #3b4252 0%, #6b7280 100%); 
                 padding: 1rem; border-radius: 8px; margin: 1rem 0; text-align: center;">
         <h4 style="color: white; margin: 0;">
-            👈 Start by selecting a table from the sidebar, then explore the tabs below! 👇
+            ⬅️ Start by selecting a table from the sidebar, then explore the tabs below! ⬇️
         </h4>
     </div>
     """, unsafe_allow_html=True)
@@ -312,7 +314,7 @@ def create_dashboard_header():
 def create_sidebar_filters(tables, libsql_adapter):
     """Create minimal sidebar with table selection and basic settings."""
     # Simple header
-    st.sidebar.markdown("### ⚙️ Settings")
+    st.sidebar.markdown("### Settings")
     
     # Preview rows setting
     st.sidebar.markdown("**Preview Rows**")
@@ -328,16 +330,16 @@ def create_sidebar_filters(tables, libsql_adapter):
     st.sidebar.markdown("---")
     
     # Table Selection
-    st.sidebar.markdown("### �️ Table Explorer")
+    st.sidebar.markdown("### Table Explorer")
     st.sidebar.markdown("**Select a table to analyze**")
     
     # Enhanced table selection with descriptions
     table_descriptions = {
-        "contacts": "👥 Contact information and details",
-        "contract_products": "📦 Products and services in contracts", 
-        "contracts": "📄 Contract agreements and terms",
-        "organizations": "🏢 Company and organization data",
-        "transactions": "💰 Financial transactions and payments"
+        "contacts": "Contact information and details",
+        "contract_products": "Products and services in contracts",
+        "contracts": "Contract agreements and terms",
+        "organizations": "Company and organization data",
+        "transactions": "Financial transactions and payments"
     }
     
     # Create a selectbox for table selection
@@ -350,15 +352,15 @@ def create_sidebar_filters(tables, libsql_adapter):
     )
     
     if selected_table:
-        description = table_descriptions.get(selected_table, "📊 Database table with structured data")
-        st.sidebar.info(f"📋 {description}")
-        
+        description = table_descriptions.get(selected_table, "Database table with structured data")
+        st.sidebar.info(description)
+
         # Show table info
         try:
             row_count = libsql_table_row_count(libsql_adapter, selected_table)
             st.sidebar.metric("Total Records", f"{row_count:,}")
         except Exception:
-            st.sidebar.warning("⚠️ Could not load table info")
+            st.sidebar.warning("Could not load table info")
     
     # Fixed settings (no UI controls needed)
     show_advanced = True  # Always enabled
@@ -373,7 +375,7 @@ def create_sidebar_filters(tables, libsql_adapter):
 
 def create_database_overview(libsql_adapter, tables):
     """Create a beautiful database overview section."""
-    st.markdown("## 📊 Database Overview")
+    st.markdown("## Database Overview")
     
     # Create metrics columns
     col1, col2, col3, col4 = st.columns(4)
@@ -398,7 +400,7 @@ def create_database_overview(libsql_adapter, tables):
                 color: white;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             ">
-                <h3 style="margin: 0; font-size: 2rem;">📋</h3>
+                <h3 style="margin: 0; font-size: 2rem;">Tables</h3>
                 <h4 style="margin: 0;">{}</h4>
                 <p style="margin: 0; opacity: 0.9;">Tables</p>
             </div>
@@ -414,7 +416,7 @@ def create_database_overview(libsql_adapter, tables):
                 color: white;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             ">
-                <h3 style="margin: 0; font-size: 2rem;">📊</h3>
+                <h3 style="margin: 0; font-size: 2rem;">Rows</h3>
                 <h4 style="margin: 0;">{:,}</h4>
                 <p style="margin: 0; opacity: 0.9;">Total Rows</p>
             </div>
@@ -432,7 +434,7 @@ def create_database_overview(libsql_adapter, tables):
                 color: white;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             ">
-                <h3 style="margin: 0; font-size: 2rem;">🔗</h3>
+                <h3 style="margin: 0; font-size: 2rem;">Connection</h3>
                 <h4 style="margin: 0;">{}</h4>
                 <p style="margin: 0; opacity: 0.9;">Connection</p>
             </div>
@@ -448,7 +450,7 @@ def create_database_overview(libsql_adapter, tables):
                 color: white;
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             ">
-                <h3 style="margin: 0; font-size: 2rem;">⚡</h3>
+                <h3 style="margin: 0; font-size: 2rem;">Status</h3>
                 <h4 style="margin: 0;">Live</h4>
                 <p style="margin: 0; opacity: 0.9;">Status</p>
             </div>
@@ -457,7 +459,7 @@ def create_database_overview(libsql_adapter, tables):
 
 def create_table_selector(tables, libsql_adapter, preview_limit, sample_percent, show_sql, export_format):
     """Create an interactive table selector with rich information."""
-    st.markdown("### 🗂️ Table Explorer")
+    st.markdown("### Table Explorer")
     st.markdown("**Step 1:** Choose a table to start exploring your data")
     
     # Enhanced table selection with descriptions
@@ -471,87 +473,80 @@ def create_table_selector(tables, libsql_adapter, preview_limit, sample_percent,
     
     # Create a more visual table selector
     selected_table = None
-    
+
     st.markdown("**Available Tables:**")
     for i, table in enumerate(tables):
-        description = table_descriptions.get(table, "📊 Database table with structured data")
-        
+        description = table_descriptions.get(table, "Database table with structured data")
+
         # Create clickable cards for each table
         if st.button(
-            f"📋 **{table.title()}** - {description}", 
+            f"{table.title()} - {description}",
             key=f"table_btn_{i}",
             use_container_width=True,
             help=f"Click to explore the {table} table"
         ):
             st.session_state.selected_table = table
-    
+
     # Get the selected table
     selected_table = st.session_state.get('selected_table', tables[0] if tables else None)
-    
+
     if selected_table:
         # Show selection confirmation
-        st.success(f"✅ **Selected Table:** {selected_table}")
-        
+        st.success(f"Selected Table: {selected_table}")
+
         # Get table info with loading indicator
         with st.spinner("Loading table information..."):
             try:
                 row_count = libsql_table_row_count(libsql_adapter, selected_table)
-                
-                # Beautiful table info card with animation-like styling
+
+                # Table info card (subtle)
                 st.markdown(f"""
                     <div style="
-                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        padding: 2rem;
-                        border-radius: 15px;
-                        color: white;
-                        margin: 1rem 0;
-                        box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-                        border: 1px solid rgba(255,255,255,0.2);
-                        backdrop-filter: blur(10px);
+                        background: linear-gradient(135deg, #f3f4f6 0%, #ffffff 100%);
+                        padding: 1.25rem;
+                        border-radius: 10px;
+                        color: #111827;
+                        margin: 0.75rem 0;
+                        border: 1px solid rgba(0,0,0,0.04);
                     ">
                         <div style="text-align: center;">
-                            <h3 style="margin: 0 0 1rem 0; font-size: 1.8rem;">📊 {selected_table.title()} Table</h3>
+                            <h3 style="margin: 0 0 0.75rem 0; font-size: 1.25rem;">{selected_table.title()} Table</h3>
                             <div style="display: flex; justify-content: space-around; align-items: center;">
                                 <div style="text-align: center;">
-                                    <p style="margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">{row_count:,}</p>
-                                    <p style="margin: 0; opacity: 0.9; font-size: 1.1rem;">Total Records</p>
+                                    <p style="margin: 0; font-size: 1.5rem; font-weight: 600;">{row_count:,}</p>
+                                    <p style="margin: 0; opacity: 0.9; font-size: 0.95rem;">Total Records</p>
                                 </div>
                                 <div style="text-align: center;">
-                                    <p style="margin: 0; font-size: 2rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">{min(row_count, preview_limit):,}</p>
-                                    <p style="margin: 0; opacity: 0.9; font-size: 1.1rem;">Preview Rows</p>
+                                    <p style="margin: 0; font-size: 1.25rem; font-weight: 600;">{min(row_count, preview_limit):,}</p>
+                                    <p style="margin: 0; opacity: 0.9; font-size: 0.95rem;">Preview Rows</p>
                                 </div>
-                            </div>
-                            <div style="margin-top: 1.5rem; padding: 1rem; background: rgba(255,255,255,0.1); border-radius: 10px;">
-                                <p style="margin: 0; font-size: 1.1rem; opacity: 0.95;">
-                                    💡 <strong>Next Step:</strong> Explore your data using the tabs on the right →
-                                </p>
                             </div>
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
-                
+
             except Exception as e:
-                st.error(f"❌ Error loading table info: {e}")
-        
+                st.error(f"Error loading table info: {e}")
+
         # Interactive action buttons with better styling
-        st.markdown("### ⚡ Quick Actions")
+        st.markdown("### Quick Actions")
         st.markdown("**Step 2:** Use these tools to work with your data")
-        
+
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🔄 **Refresh Data**", use_container_width=True, help="Reload the latest data from the database"):
+            if st.button("Refresh Data", use_container_width=True, help="Reload the latest data from the database"):
                 st.cache_data.clear()
                 st.rerun()
-        
+
         with col2:
-            if st.button("📥 **Export Data**", use_container_width=True, help="Download your data in CSV or JSON format"):
+            if st.button("Export Data", use_container_width=True, help="Download your data in CSV or JSON format"):
                 with st.spinner("Preparing download..."):
                     try:
                         df = libsql_read_table(libsql_adapter, selected_table, limit=None)
                         if export_format == "CSV":
                             csv = df.to_csv(index=False)
                             st.download_button(
-                                "📥 Download CSV File",
+                                "Download CSV File",
                                 csv,
                                 file_name=f"{selected_table}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                                 mime="text/csv",
@@ -561,76 +556,63 @@ def create_table_selector(tables, libsql_adapter, preview_limit, sample_percent,
                         elif export_format == "JSON":
                             json_str = df.to_json(indent=2, orient="records")
                             st.download_button(
-                                "📥 Download JSON File",
+                                "Download JSON File",
                                 json_str,
                                 file_name=f"{selected_table}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json",
                                 mime="application/json",
                                 use_container_width=True,
                                 help="Click to download the complete dataset as JSON"
                             )
-                        st.success("✅ Download ready! Click the button above.")
+                        st.success("Download ready. Click the button above to save the file.")
                     except Exception as e:
-                        st.error(f"❌ Export failed: {e}")
+                        st.error(f"Export failed: {e}")
     else:
-        st.info("👈 Select a table from the options above to begin exploring!")
-        
+        st.info("Select a table from the options above to begin exploring.")
+
     return selected_table
 
 
 def create_data_explorer(libsql_adapter, selected_table, preview_limit, sample_percent, show_advanced, show_sql):
     """Create the main data exploration interface with enhanced discoverability."""
     # Enhanced header with visual guidance
+    # Subtle header for the data explorer area (removed large, obtrusive gradient box)
     st.markdown(f"""
         <div style="
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
-            padding: 1.5rem;
-            border-radius: 15px;
+            background: linear-gradient(90deg, #3b4252 0%, #6b7280 100%);
+            padding: 0.8rem 1rem;
+            border-radius: 10px;
             color: white;
-            margin: 1rem 0 2rem 0;
+            margin: 1rem 0 1.5rem 0;
             text-align: center;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
         ">
-            <h2 style="margin: 0 0 1rem 0; font-size: 2rem;">🔍 Data Explorer: {selected_table.title()}</h2>
-            <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">
-                <strong>Step 3:</strong> Navigate through the tabs below to explore different aspects of your data
-            </p>
-            <div style="display: flex; justify-content: center; gap: 2rem; margin-top: 1rem;">
-                <div style="background: rgba(255,255,255,0.2); padding: 0.5rem 1rem; border-radius: 20px;">
-                    <span>📋 Raw Data</span>
-                </div>
-                <div style="background: rgba(255,255,255,0.2); padding: 0.5rem 1rem; border-radius: 20px;">
-                    <span>📊 Charts</span>
-                </div>
-                <div style="background: rgba(255,255,255,0.2); padding: 0.5rem 1rem; border-radius: 20px;">
-                    <span>🔍 Analytics</span>
-                </div>
-            </div>
+            <h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">{selected_table.title()} - Data Explorer</h2>
+            <p style="margin: 0; font-size: 0.95rem; opacity: 0.9;">Use the tabs below to view data, visualizations, and analytics.</p>
         </div>
     """, unsafe_allow_html=True)
     
     # Tab descriptions for better discoverability
     st.markdown("""
-    **💡 What's in each tab:**
-    - **📋 Data Preview**: View raw data, column details, and basic statistics
-    - **📊 Visualizations**: Interactive charts and graphs to understand patterns
-    - **🔍 Advanced Analytics**: Deep insights, correlations, and data quality metrics
+    **What's in each tab:**
+    - **Data Preview**: View raw data, column details, and basic statistics
+    - **Visualizations**: Interactive charts and graphs to understand patterns
+    - **Advanced Analytics**: Deep insights, correlations, and data quality metrics
     """)
     
     try:
         # Load data with enhanced loading feedback
-        with st.spinner(f"🔄 Loading {selected_table} data... This may take a moment for large tables."):
+        with st.spinner(f"Loading {selected_table} data... This may take a moment for large tables."):
             df = libsql_read_table(libsql_adapter, selected_table, limit=preview_limit)
-            
+
             # Apply sampling if specified
             if sample_percent > 0 and sample_percent < 100:
                 sample_size = int(len(df) * sample_percent / 100)
                 df = df.sample(n=min(sample_size, len(df)), random_state=42)
-                st.success(f"✅ Loaded {sample_percent}% sample ({len(df):,} rows from {selected_table})")
+                st.success(f"Loaded {sample_percent}% sample ({len(df):,} rows from {selected_table})")
             elif sample_percent == 0:
-                st.success(f"✅ Loaded all preview data ({len(df):,} rows from {selected_table})")
-            
+                st.success(f"Loaded all preview data ({len(df):,} rows from {selected_table})")
+
             if df.empty:
-                st.warning("⚠️ No data found in this table.")
+                st.warning("No data found in this table.")
                 st.markdown("""
                 **Possible reasons:**
                 - The table is empty
@@ -638,26 +620,26 @@ def create_data_explorer(libsql_adapter, selected_table, preview_limit, sample_p
                 - Permissions may not allow data access
                 """)
                 return
-        
+
         # Create enhanced tabs with descriptions
         tab1, tab2, tab3 = st.tabs([
-            "📋 Data Preview (Raw Data)", 
-            "📊 Visualizations (Charts)", 
-            "🔍 Advanced Analytics (Insights)"
+            "Data Preview (Raw Data)",
+            "Visualizations (Charts)",
+            "Advanced Analytics (Insights)"
         ])
         
         with tab1:
-            st.markdown("### 📋 Raw Data View")
+            st.markdown("### Raw Data View")
             st.markdown("**Explore your data table with sortable columns and detailed information**")
             create_data_preview_tab(df, selected_table, show_sql)
         
         with tab2:
-            st.markdown("### 📊 Interactive Visualizations")
+            st.markdown("### Interactive Visualizations")
             st.markdown("**Create charts and graphs to understand data patterns and trends**")
             create_visualizations_tab(df, selected_table)
         
         with tab3:
-            st.markdown("### 🔍 Advanced Data Analytics")
+            st.markdown("### Advanced Data Analytics")
             if show_advanced:
                 st.markdown("**Deep statistical analysis and data quality insights**")
                 create_advanced_analytics_tab(df, selected_table)
@@ -702,7 +684,7 @@ def create_data_preview_tab(df, table_name, show_sql):
     st.markdown("---")
     
     # Column information
-    with st.expander("📋 Column Information", expanded=False):
+    with st.expander("Column Information", expanded=False):
         col_info = []
         for col in df.columns:
             dtype = str(df[col].dtype)
@@ -724,7 +706,7 @@ def create_data_preview_tab(df, table_name, show_sql):
         st.code(f"SELECT * FROM {table_name} LIMIT {len(df)}", language="sql")
     
     # Enhanced data display
-    st.markdown("#### 📊 Data Table")
+    st.markdown("#### Data Table")
     st.dataframe(
         df,
         use_container_width=True,
@@ -743,16 +725,16 @@ def create_visualizations_tab(df, table_name):
     # Interactive guidance header
     st.markdown("""
         <div style="
-            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%);
+            background: linear-gradient(135deg, #f3f4f6 0%, #ffffff 100%);
             padding: 1rem;
             border-radius: 10px;
             color: #333;
             margin-bottom: 1.5rem;
-            border-left: 5px solid #ff6b9d;
+            border-left: 5px solid #d1d5db;
         ">
-            <h4 style="margin: 0 0 0.5rem 0;">📊 Interactive Chart Builder</h4>
+            <h4 style="margin: 0 0 0.5rem 0;">Interactive Chart Builder</h4>
             <p style="margin: 0; opacity: 0.8;">
-                Select columns below to create different types of visualizations. Each chart is interactive - hover for details!
+                Select columns below to create different types of visualizations. Each chart is interactive - hover for details.
             </p>
         </div>
     """, unsafe_allow_html=True)
@@ -762,7 +744,7 @@ def create_visualizations_tab(df, table_name):
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
     
     if not numeric_cols and not categorical_cols:
-        st.error("❌ No suitable columns found for visualization.")
+        st.error("No suitable columns found for visualization.")
         st.markdown("""
         **This might happen because:**
         - All columns contain complex data types
@@ -775,14 +757,14 @@ def create_visualizations_tab(df, table_name):
     col_info1, col_info2 = st.columns(2)
     with col_info1:
         if numeric_cols:
-            st.success(f"✅ **{len(numeric_cols)} Numeric columns** found")
+            st.success(f"{len(numeric_cols)} numeric columns found")
             st.caption("Perfect for distributions, trends, and correlations")
         else:
             st.info("ℹ️ No numeric columns available")
     
     with col_info2:
         if categorical_cols:
-            st.success(f"✅ **{len(categorical_cols)} Categorical columns** found")
+            st.success(f"{len(categorical_cols)} categorical columns found")
             st.caption("Great for counts, categories, and groupings")
         else:
             st.info("ℹ️ No categorical columns available")
@@ -792,7 +774,7 @@ def create_visualizations_tab(df, table_name):
     
     with viz_col1:
         if numeric_cols:
-            st.markdown("### 📈 **Distribution Charts**")
+            st.markdown("### Distribution Charts")
             st.markdown("*Explore the spread and frequency of numeric values*")
             
             selected_numeric = st.selectbox(
@@ -808,7 +790,7 @@ def create_visualizations_tab(df, table_name):
                         fig = px.histogram(
                             df, 
                             x=selected_numeric,
-                            title=f"📊 Distribution of {selected_numeric}",
+                            title=f"Distribution of {selected_numeric}",
                             template="plotly_white",
                             nbins=30
                         )
@@ -836,11 +818,11 @@ def create_visualizations_tab(df, table_name):
                             
                 except Exception as e:
                     st.error(f"❌ Error creating histogram: {e}")
-                    st.info("💡 Try selecting a different column or check if the data contains valid numbers.")
+                    st.info("Try selecting a different column or check if the data contains valid numbers.")
     
     with viz_col2:
         if categorical_cols:
-            st.markdown("### 📊 **Category Analysis**")
+            st.markdown("### Category Analysis")
             st.markdown("*Analyze frequency and distribution of categories*")
             
             selected_cat = st.selectbox(
@@ -860,7 +842,7 @@ def create_visualizations_tab(df, table_name):
                             fig = px.bar(
                                 x=value_counts.index,
                                 y=value_counts.values,
-                                title=f"📈 Top Categories in {selected_cat}",
+                                title=f"Top Categories in {selected_cat}",
                                 template="plotly_white"
                             )
                             fig.update_layout(
@@ -885,15 +867,15 @@ def create_visualizations_tab(df, table_name):
                             with insight_col2:
                                 st.metric("Most Common", most_common)
                         else:
-                            st.info("ℹ️ No data to visualize in selected column.")
+                            st.info("No data to visualize in selected column.")
                 except Exception as e:
                     st.error(f"❌ Error creating bar chart: {e}")
-                    st.info("💡 Try selecting a different column or check for data quality issues.")
+                    st.info("Try selecting a different column or check for data quality issues.")
     
     # Enhanced correlation heatmap section
     if len(numeric_cols) > 1:
         st.markdown("---")
-        st.markdown("### 🔥 **Correlation Analysis**")
+        st.markdown("### Correlation Analysis")
         st.markdown("*Discover relationships between numeric variables*")
         
         # Allow users to select which columns to correlate
@@ -915,7 +897,7 @@ def create_visualizations_tab(df, table_name):
                     
                     fig = px.imshow(
                         corr_matrix,
-                        title="🔥 Correlation Heatmap - Discover Data Relationships",
+                        title="Correlation Heatmap - Discover Data Relationships",
                         template="plotly_white",
                         color_continuous_scale="RdBu_r",
                         aspect="auto",
@@ -930,7 +912,7 @@ def create_visualizations_tab(df, table_name):
                     st.plotly_chart(fig, use_container_width=True)
                     
                     # Add correlation insights
-                    st.markdown("**💡 Correlation Insights:**")
+                    st.markdown("**Correlation Insights:**")
                     # Find strongest positive and negative correlations
                     corr_values = corr_matrix.values
                     mask = np.triu(np.ones_like(corr_values, dtype=bool), k=1)
@@ -944,9 +926,9 @@ def create_visualizations_tab(df, table_name):
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.info(f"🔗 **Strongest Positive:** {selected_for_corr[max_row]} ↔ {selected_for_corr[max_col]} ({corr_values[max_row, max_col]:.3f})")
+                        st.info(f"Strongest Positive: {selected_for_corr[max_row]} vs {selected_for_corr[max_col]} ({corr_values[max_row, max_col]:.3f})")
                     with col2:
-                        st.info(f"🔗 **Strongest Negative:** {selected_for_corr[min_row]} ↔ {selected_for_corr[min_col]} ({corr_values[min_row, min_col]:.3f})")
+                        st.info(f"Strongest Negative: {selected_for_corr[min_row]} vs {selected_for_corr[min_col]} ({corr_values[min_row, min_col]:.3f})")
                         
             except Exception as e:
                 st.error(f"❌ Error creating correlation heatmap: {e}")
@@ -957,21 +939,21 @@ def create_visualizations_tab(df, table_name):
         st.info("📊 Need at least 2 numeric columns for correlation analysis.")
     
     # Pro tips section
-    with st.expander("💡 **Pro Tips for Better Visualizations**", expanded=False):
+    with st.expander("Pro Tips for Better Visualizations", expanded=False):
         st.markdown("""
         **Making the Most of Your Charts:**
         
-        📊 **Distribution Charts:**
+    Distribution Charts:
         - Look for patterns: normal, skewed, or multi-modal distributions
         - Identify outliers that might need attention
         - Compare mean vs median to understand skewness
         
-        📈 **Category Charts:**
+    Category Charts:
         - Identify dominant categories in your data
         - Look for unexpected patterns or rare categories
         - Consider data quality issues with too many unique values
         
-        🔥 **Correlation Heatmaps:**
+    Correlation Heatmaps:
         - Values close to +1: strong positive relationship
         - Values close to -1: strong negative relationship  
         - Values close to 0: little to no linear relationship
@@ -985,20 +967,20 @@ def create_visualizations_tab(df, table_name):
         
     # Data quality reminders
     st.markdown("---")
-    st.markdown("**🔍 Chart Quality Notes:**")
+    st.markdown("**Chart Quality Notes:**")
     st.caption(f"Displaying visualizations for {len(df)} rows from {table_name}. Charts are interactive - hover and click to explore!")
     
     if len(df) > 10000:
-        st.info("💡 **Large Dataset Detected:** Consider using sampling in the sidebar for faster chart rendering.")
+        st.info("Large dataset detected: consider using sampling in the sidebar for faster chart rendering.")
     
     if len(df) < 10:
-        st.warning("⚠️ **Small Dataset:** Results may not be statistically meaningful with fewer than 10 rows.")
+        st.warning("Small dataset: results may not be statistically meaningful with fewer than 10 rows.")
 
 
 def create_advanced_analytics_tab(df, table_name):
     """Create advanced analytics and insights."""
     
-    st.markdown("#### 🧮 Statistical Summary")
+    st.markdown("#### Statistical Summary")
     
     # Get numeric columns for statistical analysis
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -1009,7 +991,7 @@ def create_advanced_analytics_tab(df, table_name):
         st.dataframe(desc_stats, use_container_width=True)
         
         # Missing value analysis
-        st.markdown("#### 🔍 Missing Value Analysis")
+        st.markdown("#### Missing Value Analysis")
         missing_data = df.isnull().sum()
         missing_percent = (missing_data / len(df)) * 100
         
@@ -1044,10 +1026,10 @@ def create_advanced_analytics_tab(df, table_name):
             except Exception as e:
                 st.error(f"Error creating missing data visualization: {e}")
         else:
-            st.success("✅ No missing values found!")
+            st.success("No missing values found")
     
     # Data quality metrics
-    st.markdown("#### ⚡ Data Quality Metrics")
+    st.markdown("#### Data Quality Metrics")
     
     col1, col2, col3 = st.columns(3)
     
