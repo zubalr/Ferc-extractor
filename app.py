@@ -113,7 +113,7 @@ def get_libsql_client(url: str, auth_token: Optional[str] = None) -> Any:
 
 
 def _http_execute(url: str, auth_token: Optional[str], sql: str, timeout: int = 30):
-    """Execute SQL against a libsql HTTP endpoint. Converts libsql://host to https://host/sql."""
+    """Execute SQL against a libsql HTTP endpoint. Converts libsql://host to https://host."""
     import requests
     # derive host
     # url may be libsql://<host> or libsql://<host>/<path>
@@ -144,7 +144,13 @@ def _http_execute(url: str, auth_token: Optional[str], sql: str, timeout: int = 
             resp = requests.post(base, json=payload, headers=headers, timeout=timeout)
             resp.raise_for_status()
             try:
-                return resp.json()
+                json_resp = resp.json()
+                # For Turso API, extract the first result from the response
+                if isinstance(json_resp, dict) and "results" in json_resp:
+                    results = json_resp["results"]
+                    if isinstance(results, list) and len(results) > 0:
+                        return results[0]  # Return first result, not the wrapper
+                return json_resp
             except Exception:
                 return resp.text
         except Exception as e:
@@ -189,14 +195,27 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
         cols = [f"c{i}" for i in range(len(res[0]))]
         return pd.DataFrame(res, columns=cols)
 
-    # If it's a dict-like response with 'rows' and 'columns' keys
+    # If it's a dict-like response with 'rows' and 'columns' keys (Turso format)
     if isinstance(res, dict):
-        # direct shape: {"columns": [...], "rows": [[...],[...]]}
+        # Handle the specific Turso response format first
+        # {"columns": ["name"], "rows": [["contacts"], ["contracts"], ...]}
         rows = res.get("rows")
         cols = res.get("columns") or res.get("cols")
+        if rows is not None and cols is not None:
+            try:
+                return pd.DataFrame(rows, columns=cols)
+            except Exception:
+                # Fallback if column count doesn't match
+                try:
+                    return pd.DataFrame(rows)
+                except Exception:
+                    pass
+        
+        # If only rows are present, create generic columns
         if rows is not None:
             try:
-                if cols:
+                if isinstance(rows[0], (list, tuple)) and len(rows) > 0:
+                    cols = [f"col_{i}" for i in range(len(rows[0]))]
                     return pd.DataFrame(rows, columns=cols)
                 return pd.DataFrame(rows)
             except Exception:
@@ -253,6 +272,7 @@ def libsql_list_tables(adapter: dict) -> List[str]:
             
             # CRITICAL: Always normalize the result to extract table names
             df = _normalize_libsql_result(res)
+            
             if df is not None and not df.empty:
                 # try to find a name column
                 if "name" in df.columns:
@@ -422,8 +442,32 @@ def main():
         st.error(f"Expected list of tables, got: {type(tables)} - {tables}")
         return
         
-    # Filter to only string table names
-    tables = [str(t) for t in tables if isinstance(t, str) or (isinstance(t, (list, tuple)) and len(t) == 1)]
+    # Filter to only string table names and ensure they're actually table names, not dict representations
+    clean_tables = []
+    for t in tables:
+        if isinstance(t, str):
+            # Check if it looks like a dict representation string
+            if t.startswith('{') and 'columns' in t and 'rows' in t:
+                # This is a stringified dict response - we need to parse it
+                try:
+                    import ast
+                    dict_data = ast.literal_eval(t)
+                    if isinstance(dict_data, dict) and 'rows' in dict_data:
+                        # Extract table names from the rows
+                        for row in dict_data['rows']:
+                            if isinstance(row, list) and len(row) > 0:
+                                table_name = str(row[0])
+                                if not table_name.startswith('sqlite_'):
+                                    clean_tables.append(table_name)
+                except Exception:
+                    # If parsing fails, skip this item
+                    continue
+            else:
+                # Regular table name
+                if not t.startswith('sqlite_'):
+                    clean_tables.append(t)
+    
+    tables = clean_tables
 
     if not tables:
         # If HTTP adapter, probe endpoint for debugging
