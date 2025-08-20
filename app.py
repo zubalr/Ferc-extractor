@@ -396,47 +396,25 @@ def main():
         st.error(f"Error reading database schema: {e}")
         return
 
-    # Normalize tables into a list[str] early so metrics and previews behave
-    def _normalize_tables_list(raw) -> List[str]:
-        # If already a list of strings
-        if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
-            return raw
-        # If it's a DataFrame, try to extract a name or first column
-        if isinstance(raw, pd.DataFrame):
-            df_tmp = raw
-            if "name" in df_tmp.columns:
-                return [str(x) for x in df_tmp["name"].tolist()]
-            if df_tmp.shape[1] >= 1:
-                return [str(x) for x in df_tmp.iloc[:, 0].tolist()]
-            return []
-        # If it's a dict-like response
-        if isinstance(raw, dict):
-            try:
-                df_tmp = _normalize_libsql_result(raw)
-                if "name" in df_tmp.columns:
-                    return [str(x) for x in df_tmp["name"].tolist()]
-                if df_tmp.shape[1] >= 1:
-                    return [str(x) for x in df_tmp.iloc[:, 0].tolist()]
-            except Exception:
-                return []
-        # If it's a list with dicts inside (e.g., [res_dict])
-        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
-            names = []
-            for item in raw:
-                names.extend(_normalize_tables_list(item))
-            # dedupe while preserving order
-            seen = set(); out = []
-            for n in names:
-                if n not in seen:
-                    seen.add(n); out.append(n)
-            return out
-        # Anything else: attempt to coerce to list of strings
+    # Normalize tables response from Turso/libsql into a clean list of table names
+    if isinstance(tables, dict):
+        # Turso returns: {'columns': ['name'], 'rows': [['contacts'], ['contracts'], ...]}
         try:
-            return [str(x) for x in list(raw)]
+            df_tmp = _normalize_libsql_result(tables)
+            if "name" in df_tmp.columns:
+                tables = [str(x) for x in df_tmp["name"].tolist()]
+            elif df_tmp.shape[1] >= 1:
+                tables = [str(x) for x in df_tmp.iloc[:, 0].tolist()]
+            else:
+                tables = []
         except Exception:
-            return []
-
-    tables = _normalize_tables_list(tables)
+            tables = []
+    elif not isinstance(tables, list) or not all(isinstance(x, str) for x in tables):
+        # Convert anything else to list of strings
+        try:
+            tables = [str(x) for x in tables] if tables else []
+        except Exception:
+            tables = []
 
     if not tables:
         # If HTTP adapter, probe endpoint for debugging
@@ -497,43 +475,6 @@ def main():
 
     # Main layout: left side controls, right side content
     left, right = st.columns([1, 3])
-
-    # Prepare tables for selection: ensure it's a list of strings
-    def _extract_names_from_response(res) -> List[str]:
-        """Given a libsql-like response (dict or DataFrame), try to extract a list of table names."""
-        try:
-            if isinstance(res, dict):
-                df_tmp = _normalize_libsql_result(res)
-            elif isinstance(res, pd.DataFrame):
-                df_tmp = res
-            else:
-                # unknown shape
-                return []
-
-            if "name" in df_tmp.columns:
-                return [str(x) for x in df_tmp["name"].tolist()]
-            if df_tmp.shape[1] >= 1:
-                return [str(x) for x in df_tmp.iloc[:, 0].tolist()]
-            return []
-        except Exception:
-            return []
-
-    # If we got a dict response, or a list containing a dict, normalize to list[str]
-    if isinstance(tables, dict):
-        tables = _extract_names_from_response(tables)
-    elif isinstance(tables, list) and tables and isinstance(tables[0], dict):
-        # Sometimes the HTTP adapter returns a list with a single dict response
-        names = []
-        for item in tables:
-            names.extend(_extract_names_from_response(item))
-        # dedupe while preserving order
-        seen = set()
-        deduped = []
-        for n in names:
-            if n not in seen:
-                seen.add(n)
-                deduped.append(n)
-        tables = deduped
 
     with left:
         st.header("Explore Tables")
