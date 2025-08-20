@@ -145,11 +145,16 @@ def _http_execute(url: str, auth_token: Optional[str], sql: str, timeout: int = 
             resp.raise_for_status()
             try:
                 json_resp = resp.json()
+                # Debug: Let's see the raw response structure
+                print(f"DEBUG: Raw Turso response: {json_resp}")
+                
                 # For Turso API, extract the first result from the response
                 if isinstance(json_resp, dict) and "results" in json_resp:
                     results = json_resp["results"]
                     if isinstance(results, list) and len(results) > 0:
-                        return results[0]  # Return first result, not the wrapper
+                        first_result = results[0]
+                        print(f"DEBUG: First result: {first_result}")
+                        return first_result  # Return first result, not the wrapper
                 return json_resp
             except Exception:
                 return resp.text
@@ -166,6 +171,9 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
     """Normalize possible libsql client results into a pandas DataFrame.
     This attempts several common return shapes.
     """
+    print(f"DEBUG: Normalizing result type: {type(res)}")
+    print(f"DEBUG: Normalizing result content: {res}")
+    
     # If it's already a DataFrame
     if isinstance(res, pd.DataFrame):
         return res
@@ -197,14 +205,23 @@ def _normalize_libsql_result(res: Any) -> pd.DataFrame:
 
     # If it's a dict-like response with 'rows' and 'columns' keys (Turso format)
     if isinstance(res, dict):
+        print(f"DEBUG: Processing dict with keys: {list(res.keys())}")
+        
         # Handle the specific Turso response format first
         # {"columns": ["name"], "rows": [["contacts"], ["contracts"], ...]}
         rows = res.get("rows")
         cols = res.get("columns") or res.get("cols")
+        
+        print(f"DEBUG: Found rows: {rows}")
+        print(f"DEBUG: Found columns: {cols}")
+        
         if rows is not None and cols is not None:
             try:
-                return pd.DataFrame(rows, columns=cols)
-            except Exception:
+                df = pd.DataFrame(rows, columns=cols)
+                print(f"DEBUG: Successfully created DataFrame with shape: {df.shape}")
+                return df
+            except Exception as e:
+                print(f"DEBUG: Failed to create DataFrame with columns: {e}")
                 # Fallback if column count doesn't match
                 try:
                     return pd.DataFrame(rows)
