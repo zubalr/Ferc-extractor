@@ -396,6 +396,48 @@ def main():
         st.error(f"Error reading database schema: {e}")
         return
 
+    # Normalize tables into a list[str] early so metrics and previews behave
+    def _normalize_tables_list(raw) -> List[str]:
+        # If already a list of strings
+        if isinstance(raw, list) and all(isinstance(x, str) for x in raw):
+            return raw
+        # If it's a DataFrame, try to extract a name or first column
+        if isinstance(raw, pd.DataFrame):
+            df_tmp = raw
+            if "name" in df_tmp.columns:
+                return [str(x) for x in df_tmp["name"].tolist()]
+            if df_tmp.shape[1] >= 1:
+                return [str(x) for x in df_tmp.iloc[:, 0].tolist()]
+            return []
+        # If it's a dict-like response
+        if isinstance(raw, dict):
+            try:
+                df_tmp = _normalize_libsql_result(raw)
+                if "name" in df_tmp.columns:
+                    return [str(x) for x in df_tmp["name"].tolist()]
+                if df_tmp.shape[1] >= 1:
+                    return [str(x) for x in df_tmp.iloc[:, 0].tolist()]
+            except Exception:
+                return []
+        # If it's a list with dicts inside (e.g., [res_dict])
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            names = []
+            for item in raw:
+                names.extend(_normalize_tables_list(item))
+            # dedupe while preserving order
+            seen = set(); out = []
+            for n in names:
+                if n not in seen:
+                    seen.add(n); out.append(n)
+            return out
+        # Anything else: attempt to coerce to list of strings
+        try:
+            return [str(x) for x in list(raw)]
+        except Exception:
+            return []
+
+    tables = _normalize_tables_list(tables)
+
     if not tables:
         # If HTTP adapter, probe endpoint for debugging
         if libsql_adapter is not None and libsql_adapter.get("type") == "http":
@@ -495,7 +537,10 @@ def main():
 
     with left:
         st.header("Explore Tables")
-        table = st.selectbox("Select table", tables if tables else [])
+        if not tables:
+            st.info("No tables discovered. If your Turso DB contains tables, ensure the TURSO_AUTH_TOKEN is correct and redeploy.")
+            return
+        table = st.selectbox("Select table", tables)
         show_sql = st.checkbox("Show SQL preview")
         sample_percent = st.slider("Sample % (0 = none)", 0, 100, 0)
         download_all = st.button("Download full table CSV")
@@ -504,6 +549,14 @@ def main():
         st.caption("Table stats and quick filters appear here after selecting a table.")
 
     # Load table data
+    # Ensure `table` is a simple string
+    if not isinstance(table, str):
+        try:
+            table = str(table)
+        except Exception:
+            st.error("Selected table name is not a string. Aborting.")
+            return
+
     try:
         if libsql_adapter is not None:
             df = libsql_read_table(libsql_adapter, table, limit=preview_limit)
